@@ -80,6 +80,10 @@ static int notify(const char *text) {
   return sceKernelSendNotificationRequest(0, &req, sizeof req, 0);
 }
 
+#ifdef PBS_DISCORD
+void pbsd_notify(const char *text) { notify(text); }
+#endif
+
 static FILE *open_report(const char *name, const char *mode) {
   char path[160];
   snprintf(path, sizeof path, "%s/%s", PBS_DATA_DIR, name);
@@ -287,7 +291,7 @@ static void pbs_audio_drain(FILE *f, pbs_inject_t *ctx, pbs_audio_t *audio, unsi
   }
 }
 
-static int capture_stream(FILE *f, pbs_inject_t *ctx, uint64_t handle, int seconds, int port, int width, int height, unsigned capture_feature, int audio_mode) {
+static int capture_stream(FILE *f, pbs_inject_t *ctx, uint64_t handle, int seconds, int port, int width, int height, int fps, unsigned capture_feature, int audio_mode) {
   if (seconds < 0 || seconds > 60) return -1;
   int serving = seconds == 0 || stress_live;
   int recover = 0;
@@ -343,7 +347,7 @@ static int capture_stream(FILE *f, pbs_inject_t *ctx, uint64_t handle, int secon
           fprintf(f, "Annex B headers: SPS=%llu PPS=%llu\n",
                   (unsigned long long)sps_len, (unsigned long long)pps_len);
           if (serving) {
-            int server_rc = pbs_h264_server_start(port, width, height, metadata + 0x18, sps_len, metadata + 0xa0, pps_len);
+            int server_rc = pbs_h264_server_start_at_rate(port, width, height, fps, metadata + 0x18, sps_len, metadata + 0xa0, pps_len);
             int bound_port = server_rc ? 0 : pbs_h264_server_port();
             fprintf(f, "H.264 HTTP :%d -> %d\n", port, server_rc);
             if (!server_rc) {
@@ -488,7 +492,7 @@ static int release_capture_step(void *opaque,pbs_ps5_release_step step) {
 /* Production entry point: exported capture APIs and caller-owned handles. */
 int main(int argc, char **argv) {
   const char *mode = argc > 1 ? argv[1] : "avserve";
-  if (strcmp(mode, "avserve")) { notify("PBS: use avserve [720p|1080p|1440p|2160p] [bitrate=N] [minqp=N] [norate] [offsetdump] [dependencydump] [moduledump] [noaudio] [nocontroller] [port]"); return 1; }
+  if (strcmp(mode, "avserve")) { notify("PBS: use avserve [720p|1080p|1440p|2160p] [fps=30|60] [bitrate=N] [minqp=N] [norate] [offsetdump] [dependencydump] [moduledump] [noaudio] [nocontroller] [port]"); return 1; }
   char *serve_args[] = {argv[0], "avopenfast", "SceRemotePlay", "grant", "11", "2", "0", "9999", "2560", "1440", "1"};
 #if defined(PBS_PS5_DEFAULT_1080P)
   serve_args[4] = "12"; serve_args[8] = "1920"; serve_args[9] = "1080";
@@ -547,6 +551,9 @@ int main(int argc, char **argv) {
         module_file_dump = 1;
       } else if (!strcmp(argv[i], "nocontroller")) {
         controller_enabled = 0;
+      } else if (!strncmp(argv[i], "fps=", 4)) {
+        if (strcmp(argv[i] + 4, "30") && strcmp(argv[i] + 4, "60")) return 1;
+        serve_args[10] = !strcmp(argv[i] + 4, "30") ? "0" : "1";
       }
     }
     requested_video_budget = requested_video_bitrate;
@@ -559,6 +566,7 @@ int main(int argc, char **argv) {
       if (!strcmp(argv[i], "dependencydump")) continue;
       if (!strcmp(argv[i], "moduledump")) continue;
       if (!strcmp(argv[i], "nocontroller")) continue;
+      if (!strncmp(argv[i], "fps=", 4)) continue;
       if (!strcmp(argv[i], "noaudio")) { audio_mode = 0; continue; }
       if (!strcmp(argv[i], "720p")) { automatic_resolution = 0; serve_args[4] = "12"; serve_args[8] = "1280"; serve_args[9] = "720"; continue; }
       if (!strcmp(argv[i], "1080p")) { automatic_resolution = 0; serve_args[4] = "12"; serve_args[8] = "1920"; serve_args[9] = "1080"; continue; }
@@ -569,7 +577,7 @@ int main(int argc, char **argv) {
       if (!end || *end || port < 1 || port > 65535) return 1;
       serve_args[7] = argv[i];
     }
-    argv = serve_args; argc = 10; mode = "avopenfast";
+    argv = serve_args; argc = 11; mode = "avopenfast";
   }
 
   if (mkdir(PBS_DATA_DIR, 0777) && errno != EEXIST) {
@@ -634,13 +642,23 @@ int main(int argc, char **argv) {
     if (automatic_resolution && height==1440 && pbs_ps5_legacy_resolution_modes(capture_firmware)) {
       width=1920; height=1080; capture_feature=12;
     }
+    if (live_request && height == 2160 && pbs_ps5_2160_unavailable(capture_firmware)) {
+      width = 1920; height = 1080; capture_feature = 12;
+      notify("PBS: 4K capture unavailable on this firmware; using 1080p at the same FPS and bitrate");
+    }
     pbs_capture_profile previous_profile = {width, height, capture_feature};
     int changing_profile = 0;
-    if (live_request) pbs_h264_enable_profile_mask(pbs_ps5_legacy_resolution_modes(capture_firmware)?11u:PBS_CAPTURE_PROFILES_ALL);
-    /* Diagnostic native frame-rate enum: 0=30, 1=60; 2 is unverified.
-     * Streaming keeps the verified 60 fps profile and matching timestamps. */
+    if (live_request) {
+      unsigned mask = pbs_ps5_legacy_resolution_modes(capture_firmware)?11u:PBS_CAPTURE_PROFILES_ALL;
+      if (pbs_ps5_2160_unavailable(capture_firmware)) mask &= ~pbs_capture_profile_bit(2160);
+      pbs_h264_enable_profile_mask(mask);
+    }
+    /* Existing native frame-rate modes: 0=30, 1=60. Keep metadata and
+     * profile-reopen state paired with the selected capture mode. */
     uint32_t fps_mode = argc > 10 ? (uint32_t)strtoul(argv[10], NULL, 0) : 1;
-    if (fps_mode > 2 || (argc > 6 && !atoi(argv[6]) && fps_mode != 1)) return 1;
+    if (fps_mode > 1) return 1;
+    uint32_t previous_fps_mode = fps_mode;
+    if (live_request) pbs_h264_enable_framerates(PBS_CAPTURE_FRAMERATES_ALL);
     if (!((width == 1280 && height == 720) || (width == 1920 && height == 1080) ||
           (width == 2560 && height == 1440) || (width == 3840 && height == 2160))) return 1;
     long (*call)(pbs_inject_t *, intptr_t, const uint64_t[6]) =
@@ -654,6 +672,7 @@ avopen_retry:;
     }
     int open_attempted = 0;
     int opened_session = 0;
+    int output_profile_fallback = 0;
     live_profile_ready = 0;
     int owned_session_closed = 1;
     int dump_this_open = 0;
@@ -893,12 +912,53 @@ avopen_retry:;
     }
     if (argc > 4) {
       intptr_t fn_mode = pbs_resolve_in(ctx.pid, "libSceAvcap2.sprx", "sceAvcap2GetVideoOutMode");
-      uint32_t video_mode = 0;
-      long mr = fn_mode ? call(&ctx, fn_mode,
-          (uint64_t[6]){(uint64_t)base + 0x700, 0, 0, 0, 0, 0}) : LONG_MIN;
-      if (mr == LONG_MIN || (int32_t)(uint32_t)mr < 0 ||
-          pbs_inject_read_at(&ctx, base + 0x700, &video_mode, sizeof video_mode)) {
-        fprintf(f, "GetVideoOutMode failed -> %s\n", fmt_rc(mr));
+      uint32_t video_mode = 0, previous_mode = 0;
+      const uint64_t output_deadline = capture_clock_ms() + 10000;
+      int waiting_for_output = 0;
+      for (;;) {
+        if (live_request && live_server_started && !pbs_h264_server_running())
+          goto avopen_cleanup;
+        long mr = fn_mode ? call(&ctx, fn_mode,
+            (uint64_t[6]){(uint64_t)base + 0x700, 0, 0, 0, 0, 0}) : LONG_MIN;
+        if (mr == LONG_MIN || (int32_t)(uint32_t)mr < 0 ||
+            capture_call_uncertain || ctx.asserted ||
+            pbs_inject_read_at(&ctx, base + 0x700, &video_mode, sizeof video_mode)) {
+          fprintf(f, "GetVideoOutMode failed -> %s\n", fmt_rc(mr));
+          goto avopen_cleanup;
+        }
+        if (live_request && live_server_started && !pbs_h264_server_running())
+          goto avopen_cleanup;
+        // A game/output transition was observed returning zero immediately
+        // before a rejected open. Defer that open and require two matching
+        // nonzero samples. Keep an existing dashboard available while waiting.
+        if (video_mode && video_mode == previous_mode) break;
+        if (!video_mode && !waiting_for_output) {
+          fprintf(f, "Waiting for stable video output before OpenVideo\n");
+          fflush(f);
+          waiting_for_output = 1;
+        }
+        previous_mode = video_mode;
+        if ((!live_request || !live_server_started) && capture_clock_ms() >= output_deadline) {
+          snprintf(failure_note, sizeof failure_note, "PBS: video output not ready; reload after the game finishes launching");
+          fprintf(f, "Video output readiness timed out; OpenVideo was not attempted\n");
+          goto avopen_cleanup;
+        }
+        usleep(250000);
+      }
+      if (waiting_for_output) fprintf(f, "Video output ready: 0x%x\n", video_mode);
+      const int incompatible_1440 = pbs_ps5_1440_unavailable_for_output(capture_firmware, video_mode);
+      if (live_request) {
+        unsigned mask = pbs_ps5_legacy_resolution_modes(capture_firmware) ? 11u : PBS_CAPTURE_PROFILES_ALL;
+        if (pbs_ps5_2160_unavailable(capture_firmware)) mask &= ~pbs_capture_profile_bit(2160);
+        if (incompatible_1440) mask &= ~pbs_capture_profile_bit(1440);
+        pbs_h264_enable_profile_mask(mask);
+        if (!incompatible_1440) pbs_h264_clear_profile_fallback();
+      }
+      if (live_request && height == 1440 && incompatible_1440) {
+        // Release our initialized objects before selecting the compatible size.
+        // No open is issued for the exact pair that failed on this hardware.
+        output_profile_fallback = 1;
+        fprintf(f, "1440p unavailable for this video output; preparing 1080p at unchanged FPS/bitrate\n");
         goto avopen_cleanup;
       }
       /* Use the firmware's video-mode field, read immediately before OpenVideo. */
@@ -917,6 +977,8 @@ avopen_retry:;
       pbs_ps5_dump_request(f, "before OpenVideo", scratch_zero + 8, avcap->request_size);
       offset_dumped = dump_this_open = 1;
     }
+    if (live_request && live_server_started && !pbs_h264_server_running())
+      goto avopen_cleanup;
     open_attempted = 1;
     long rc = fn_open ? call(&ctx, fn_open,
                               (uint64_t[6]){(uint64_t)base, (uint64_t)base + 8, 0, 0, 0, 0}) : LONG_MIN;
@@ -960,7 +1022,7 @@ avopen_retry:;
         opened_session = 1;
         owned_session_closed = 0;
         if (diagnostic_open_only) fprintf(f, "diagnostic open-only: closing handle without starting stream\n");
-        else if (argc > 6) capture_stream(f, &ctx, h, atoi(argv[6]), argc > 7 ? atoi(argv[7]) : 9999, width, height, capture_feature, audio_mode);
+        else if (argc > 6) capture_stream(f, &ctx, h, atoi(argv[6]), argc > 7 ? atoi(argv[7]) : 9999, width, height, fps_mode == 0 ? 30 : 60, capture_feature, audio_mode);
         intptr_t close_fn = pbs_resolve_in(ctx.pid, "libSceAvcap2.sprx", "sceAvcap2Close");
         if (close_fn && !ctx.asserted) {
           long close_rc = call(&ctx, close_fn, (uint64_t[6]){h, 0, 0, 0, 0, 0});
@@ -986,33 +1048,62 @@ avopen_cleanup:;
     fclose(f);
     /* Reconfigure only after closing handles, stopping the resource request,
      * clearing its callback and balancing our Initialize reference. */
-    if (changing_profile && !live_profile_ready) {
+    if (changing_profile && !live_profile_ready && !output_profile_fallback) {
       pbs_h264_profile_failed();
       width = previous_profile.width; height = previous_profile.height;
       capture_feature = previous_profile.feature;
+      fps_mode = previous_fps_mode;
     }
     changing_profile = 0;
-    int requested_height = 0;
-    if (live_request && clear_ok && !ctx.asserted && pbs_h264_take_profile_request(&requested_height)) {
+    int requested_height = 0, requested_fps = 0;
+    if (live_request && clear_ok && !ctx.asserted && pbs_h264_take_video_profile_request(&requested_height, &requested_fps)) {
       pbs_capture_profile next;
       if (!pbs_capture_profile_for_height(requested_height, &next)) {
         /* A web/Studio selection is explicit, just like a command-line
          * profile. Do not silently replace it with the automatic startup profile. */
         automatic_resolution = 0;
         previous_profile = (pbs_capture_profile){width, height, capture_feature};
+        previous_fps_mode = fps_mode;
         width = next.width; height = next.height; capture_feature = next.feature;
+        fps_mode = requested_fps == 30 ? 0 : 1;
         changing_profile = 1;
       }
     }
     /* A rejected OpenVideo may leave a backend slot occupied even when the
      * public cleanup calls succeed. Reopen only after closing a real handle. */
     int server_running = live_request && pbs_h264_server_running();
+    if (output_profile_fallback && !open_attempted && clear_ok && !ctx.asserted &&
+        (server_running || (live_request && !live_server_started))) {
+      // A pending explicit selection takes precedence. Otherwise adjust only
+      // the incompatible size, retaining the selected frame rate and bitrate.
+      if (height == 1440) {
+        previous_profile = (pbs_capture_profile){width, height, capture_feature};
+        previous_fps_mode = fps_mode;
+        width = 1920; height = 1080; capture_feature = 12;
+        changing_profile = 1;
+        pbs_h264_profile_fallback(1440, height, fps_mode == 0 ? 30 : 60);
+        notify("PBS: 1440p unavailable with the current video output.\nUsing 1080p; frame rate and bitrate unchanged.");
+      }
+      usleep(250000);
+      if (!live_server_started || pbs_h264_server_running()) goto avopen_retry;
+    }
     if (pbs_ps5_can_reopen_capture(clear_ok, ctx.asserted,
                                    opened_session, server_running)) {
       usleep(250000);
       if (pbs_h264_server_running()) goto avopen_retry;
     }
+#ifdef PBS_DISCORD
+    if (live_request && live_server_started && pbs_h264_server_running()) {
+      /* Capture has completed its existing cleanup. Keep our dashboard and
+       * independent Discord voice call available until an explicit shutdown.
+       * No additional backend open is attempted after a rejected open. */
+      pbs_h264_capture_failed(stream_failure[0] ? stream_failure : failure_note);
+      notify("PBS: video capture stopped. Dashboard remains available; reload PBS to retry capture.");
+      pbs_h264_server_wait();
+    } else if (live_request) { pbs_h264_server_stop(); pbs_h264_server_wait(); }
+#else
     if (live_request) { pbs_h264_server_stop(); pbs_h264_server_wait(); }
+#endif
     pbs_input_shutdown();
     notify(live_server_started ? "PBS: streaming stopped"
                                : (stream_failure[0] ? stream_failure : failure_note));

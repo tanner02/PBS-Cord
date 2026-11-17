@@ -3,9 +3,8 @@ name: CI
 # Compile and run the offline unit tests. Never publishes a release and never
 # contacts a console.
 on:
-  push:
-    branches: [master]
-  pull_request:
+  # Keep the upstream backend matrix available manually. PBS Cord's CMake
+  # integration is checked automatically by pbs-cord.yml.
   workflow_dispatch:
 
 permissions:

@@ -22,10 +22,14 @@ args = parser.parse_args()
 root = Path(__file__).resolve().parent
 generated = args.out or root / 'build/generated'
 generated.mkdir(parents=True, exist_ok=True)
+livestream = (root / 'web/qrcodegen.js').read_text(encoding='utf-8') + '\n' + \
+    (root / 'web/destination-picker.js').read_text(encoding='utf-8').replace('</script', '<\\/script') + '\n' + \
+    (root / 'web/livestream.js').read_text(encoding='utf-8').replace('</script', '<\\/script')
 viewer = (root / 'web/h264.html').read_text(encoding='utf-8').replace(
     '/*PBS_MUX*/', (root / 'web/h264-mux.js').read_text(encoding='utf-8')).replace(
     '/*PBS_CONTROLLER*/', (root / 'web/controller.js').read_text(encoding='utf-8').replace('</script', '<\\/script')).replace(
-    '/*PBS_VIDEOJS*/', (root / 'web/vendor/videojs-player.js').read_text(encoding='utf-8').replace('</script', '<\\/script'))
+    '/*PBS_VIDEOJS*/', (root / 'web/vendor/videojs-player.js').read_text(encoding='utf-8').replace('</script', '<\\/script')).replace(
+    '/*PBS_LIVESTREAM*/', livestream)
 escaped = viewer.replace('\\', '\\\\').replace('"', '\\"').replace('\r', '').replace('\n', '\\n').replace('?', r'\?')
 (generated / 'webui.h').write_text(
     '#pragma once\nstatic const char PBS_H264_HTML[] = "' + escaped + '";\n', encoding='utf-8')

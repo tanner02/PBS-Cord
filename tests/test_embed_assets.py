@@ -49,6 +49,14 @@ class EmbedAssetsTest(unittest.TestCase):
         out = self.embed(logo_env="0")
         self.assertIn("PBS_BANNER_LEN = 0", (out / "banner.h").read_text(encoding='utf-8'))
 
+    def test_streaming_only_build_omits_voice_controls_and_disables_their_requests(self):
+        out = self.embed()
+        viewer = (out / 'webui.h').read_text(encoding='utf-8')
+        self.assertNotIn('id=\\"discord-voice-panel\\"', viewer)
+        self.assertTrue('loadVoice' not in viewer)
+        self.assertIn('id=\\"discord-video-panel\\"', viewer)
+        self.assertIn('id=\\"player\\"', viewer)
+
 
 if __name__ == "__main__":
     unittest.main()

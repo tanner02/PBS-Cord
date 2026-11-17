@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Local-only browser fixture: real HTTP server with synthetic Annex B video.
 #include "common/http/server.h"
+#include "common/media/profiles.h"
 #include <assert.h>
 #include <signal.h>
 #include <stdio.h>
@@ -24,7 +25,8 @@ int main(int argc,char **argv){
   }
   assert(count&&sps_len&&pps_len);offsets[count]=(size_t)size;
   signal(SIGTERM,stopping);signal(SIGINT,stopping);
-  pbs_h264_enable_profiles();pbs_audio_configure("pcm_f32le",2,48000);
+  pbs_h264_enable_profiles();pbs_h264_enable_framerates(PBS_CAPTURE_FRAMERATES_ALL);
+  pbs_audio_configure("pcm_f32le",2,48000);
   assert(!pbs_h264_server_start(18101,1280,720,data+sps_at,sps_len,data+pps_at,pps_len));
   puts("Local dashboard fixture ready on port 18101");fflush(stdout);
   unsigned index=0;float pcm[1600]={0};

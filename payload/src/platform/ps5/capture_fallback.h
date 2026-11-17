@@ -2,6 +2,23 @@
 #pragma once
 #include <stdint.h>
 
+/* This firmware rejected 2160p with OpenVideo=0x81950008 in each observed
+ * output state (0x138/0x13c/0x140). Keep unsupported requests out of live
+ * capture, where a rejected open would invalidate the capture session. */
+static inline int pbs_ps5_2160_unavailable(uint32_t firmware) {
+  return firmware == 0x12000043u;
+}
+
+/* Empirically observed 1440p capture limitations for these exact output states.
+ * FW12.00 logs reject 0x10 and 0x14 with 0x81950008 before a companion launch;
+ * 0x13c has repeated successful 1440p opens and must remain available.
+ * The video-mode value is not a decoded HDR or 120 Hz enum. */
+static inline int pbs_ps5_1440_unavailable_for_output(
+    uint32_t firmware, uint32_t video_mode) {
+  return firmware == 0x12000043u &&
+         (video_mode == 0x140u || video_mode == 0x10u || video_mode == 0x14u);
+}
+
 /* Some firmware/output-state combinations reject an automatic 1440p
  * request. Prefer 1080p on the first open: a rejected attempt can leave the
  * encoder locked even after clearing the callback.

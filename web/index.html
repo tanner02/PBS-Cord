@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="referrer" content="no-referrer">
+  <title>PBS Discord · Stream control</title>
+  <link rel="stylesheet" href="/style.css">
+  <script defer src="/qrcodegen.js"></script>
+  <script defer src="/app.js"></script>
+</head>
+<body>
+<main>
+  <header><div><p class="eyebrow">PBS / DISCORD</p><h1>Stream control</h1></div><span id="state" class="badge" role="status">Not paired</span></header>
+  <p class="intro">Link your Discord account, choose a voice channel, and share this console’s capture.</p>
+  <p id="error" class="error" role="alert" hidden></p>
+  <section id="pair-panel" aria-labelledby="pair-title">
+    <h2 id="pair-title">Pair this dashboard</h2>
+    <p>Enter the pairing code printed on the console. This code stays in this browser tab’s session.</p>
+    <form id="pair-form"><label for="pair-code">Console pairing code</label><div class="inline"><input id="pair-code" type="password" required maxlength="128" autocomplete="off" spellcheck="false"><button type="submit">Pair</button></div></form>
+  </section>
+  <div id="dashboard" hidden>
+    <div class="grid">
+      <section aria-labelledby="account-title">
+        <h2 id="account-title">1 · Discord account</h2>
+        <p id="account">No account linked</p>
+        <button id="link" type="button">Link with Discord QR</button>
+        <div id="qr-panel" hidden><div id="qr" aria-label="Discord account linking QR code"></div><p>Scan in the official Discord mobile app. Review and approve the account link there.</p><a id="qr-link" target="_blank" rel="noopener noreferrer">Open Discord link</a></div>
+        <p id="link-progress" role="status" hidden>Waiting for Discord account approval…</p>
+        <form id="unlock-form" hidden><label for="unlock-pass">Saved account passphrase</label><input id="unlock-pass" type="password" required autocomplete="off" maxlength="1024"><button type="submit">Unlock saved account</button></form>
+        <form id="vault-form" hidden><label for="vault-pass">Passphrase to save this account</label><input id="vault-pass" type="password" required autocomplete="new-password" maxlength="1024"><button type="submit">Save encrypted account</button></form>
+        <p id="vault-state" class="muted"></p>
+        <button id="logout" class="secondary" type="button" hidden>Sign out and forget saved account</button>
+      </section>
+      <section aria-labelledby="channel-title">
+        <h2 id="channel-title">2 · Destination</h2>
+        <label for="server">Server or direct messages</label><select id="server"><option value="">Direct messages</option></select>
+        <label for="channel">Voice channel</label><select id="channel"><option value="">Choose a destination</option></select>
+        <p id="channel-note" class="muted">Link an account to load channels.</p>
+        <div class="inline actions"><button id="start" type="button" disabled>Start stream</button><button id="stop" type="button" class="secondary" disabled>Stop stream</button></div>
+        <p id="destination" class="muted">No active stream</p>
+      </section>
+    </div>
+    <section aria-labelledby="health-title"><h2 id="health-title">Live capture &amp; transport</h2><p class="muted">Reported by the console. Counters show actual packets sent.</p><dl class="metrics">
+      <div><dt>Capture</dt><dd id="capture">Inactive</dd></div><div><dt>Capture format</dt><dd id="format">—</dd></div><div><dt>Dropped frames</dt><dd id="dropped">0</dd></div><div><dt>DAVE encryption</dt><dd id="dave">Not ready</dd></div><div><dt>Video packets</dt><dd id="video">0</dd></div><div><dt>Audio packets</dt><dd id="audio">0</dd></div><div><dt>Bytes sent</dt><dd id="bytes">0</dd></div><div><dt>Stream format</dt><dd id="stream-format">—</dd></div>
+    </dl></section>
+    <footer><span id="updated">Waiting for console status</span><button id="unpair" class="text-button" type="button">Unpair this tab</button></footer>
+  </div>
+</main>
+</body>
+</html>

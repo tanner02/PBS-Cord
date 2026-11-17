@@ -4,6 +4,12 @@
  * feature when reopening at 1080p (or vice versa). */
 typedef struct { int width, height; unsigned feature; } pbs_capture_profile;
 #define PBS_CAPTURE_PROFILES_ALL 15u
+#define PBS_CAPTURE_FPS_30 1u
+#define PBS_CAPTURE_FPS_60 2u
+#define PBS_CAPTURE_FRAMERATES_ALL (PBS_CAPTURE_FPS_30 | PBS_CAPTURE_FPS_60)
+static inline unsigned pbs_capture_framerate_bit(int fps) {
+  return fps == 30 ? PBS_CAPTURE_FPS_30 : fps == 60 ? PBS_CAPTURE_FPS_60 : 0;
+}
 static inline unsigned pbs_capture_profile_bit(int height) {
   switch (height) { case 720:return 1; case 1080:return 2; case 1440:return 4; case 2160:return 8; default:return 0; }
 }

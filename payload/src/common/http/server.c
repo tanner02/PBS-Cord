@@ -1,5 +1,9 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "common/http/server.h"
+#ifdef PBS_DISCORD
+#include "capture_bridge.h"
+#include "discord_bridge.h"
+#endif
 #include "webui.h"
 #include "banner.h"
 #include "common/media/rtp.h"
@@ -54,8 +58,11 @@ static struct {
   int running, listener, port, clients, key_request, rec_pending, width, height, fps;
   int media_clients;
   int restart_request;
-  int profiles_enabled, profile_pending, profile_changing, profile_height, profile_error, profile_error_height;
-  unsigned profile_mask;
+  int profiles_enabled, profile_pending, profile_changing, profile_height, profile_fps;
+  int profile_error, profile_error_height, profile_error_fps, profile_fallback_height;
+  char capture_error[192];
+  unsigned profile_mask, framerate_mask;
+  int framerates_enabled;
   uint64_t generation;
   FILE *rec;
   int rec_headers_pending;
@@ -71,7 +78,7 @@ static struct {
   pthread_t acceptor, workers[16];
   int acceptor_valid, worker_valid[16], worker_active[16], worker_fd[16];
 } live = { .lock = PTHREAD_MUTEX_INITIALIZER, .changed = PTHREAD_COND_INITIALIZER, .listener = -1,
-           .audio_channels = 2, .audio_rate = 48000 };
+           .audio_channels = 2, .audio_rate = 48000, .framerate_mask = PBS_CAPTURE_FPS_60 };
 
 /* Wake periodically even when capture is suspended. A disconnected reader
  * must release its slot rather than waiting forever for another frame. */
@@ -81,7 +88,7 @@ static int wait_media(int fd, uint64_t generation, int audio) {
   pthread_cond_timedwait(&live.changed, &live.lock, &deadline);
   char byte;
   ssize_t n = recv(fd, &byte, 1, MSG_PEEK | MSG_DONTWAIT);
-  return live.running && generation == (audio ? live.audio_generation : live.generation) &&
+  return live.running && !live.capture_error[0] && generation == (audio ? live.audio_generation : live.generation) &&
     !(n == 0 || (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR));
 }
 void pbs_h264_discontinuity(void) {
@@ -90,6 +97,11 @@ void pbs_h264_discontinuity(void) {
   if (live.rec) live.rec_headers_pending = 1;
   live.key_request = 1;
   pthread_cond_broadcast(&live.changed);
+#ifdef PBS_DISCORD
+  /* Lifecycle notifications are ordered with start/stop. Media copies below
+   * run outside live.lock; these bounded state changes must be atomic with it. */
+  pbsd_capture_discontinuity();
+#endif
   pthread_mutex_unlock(&live.lock);
 }
 int pbs_h264_take_restart_request(void) {
@@ -106,18 +118,46 @@ void pbs_h264_enable_profile_mask(unsigned mask) {
   live.profiles_enabled=1; live.profile_mask=mask&PBS_CAPTURE_PROFILES_ALL;
   pthread_mutex_unlock(&live.lock);
 }
-int pbs_h264_take_profile_request(int *height) {
+void pbs_h264_enable_framerates(unsigned mask) {
+  pthread_mutex_lock(&live.lock);
+  live.framerate_mask = mask & PBS_CAPTURE_FRAMERATES_ALL;
+  live.framerates_enabled = 1;
+  pthread_mutex_unlock(&live.lock);
+}
+int pbs_h264_take_video_profile_request(int *height, int *fps) {
   pthread_mutex_lock(&live.lock);
   int requested = live.profile_pending;
-  if (requested) { *height = live.profile_height; live.profile_pending = 0; }
+  if (requested) { *height = live.profile_height; *fps = live.profile_fps; live.profile_pending = 0; }
   pthread_mutex_unlock(&live.lock);
   return requested;
+}
+int pbs_h264_take_profile_request(int *height) {
+  int fps;
+  return pbs_h264_take_video_profile_request(height, &fps);
 }
 void pbs_h264_profile_failed(void) {
   pthread_mutex_lock(&live.lock);
   live.profile_error = 1; live.profile_changing = live.profile_pending = 0;
   live.profile_error_height = live.profile_height;
+  live.profile_error_fps = live.profile_fps;
   live.profile_height = live.height;
+  live.profile_fps = live.fps;
+  live.profile_fallback_height = 0;
+  pthread_mutex_unlock(&live.lock);
+}
+void pbs_h264_profile_fallback(int from_height, int height, int fps) {
+  pthread_mutex_lock(&live.lock);
+  live.profile_error = live.profile_error_height = live.profile_error_fps = 0;
+  live.profile_pending = 0;
+  live.profile_height = height;
+  live.profile_fps = fps;
+  live.profile_changing = 1;
+  live.profile_fallback_height = from_height;
+  pthread_mutex_unlock(&live.lock);
+}
+void pbs_h264_clear_profile_fallback(void) {
+  pthread_mutex_lock(&live.lock);
+  live.profile_fallback_height = 0;
   pthread_mutex_unlock(&live.lock);
 }
 
@@ -150,21 +190,50 @@ static void profile_reply(int fd, int code, const char *message) {
 }
 #include "common/http/controller_routes.h"
 static void select_profile(int fd, const char *path) {
-  int height = 0, consumed = 0, code = 200;
-  const char *message = "Resolution change requested";
-  if (sscanf(path, "/capture/profile?height=%d%n", &height, &consumed) != 1 ||
-      path[consumed] || pbs_capture_profile_for_height(height, NULL)) {
+  static const char prefix[] = "/capture/profile?height=";
+  int code = 200, fps = 0;
+  const char *message = "Video profile change requested";
+  if (strncmp(path, prefix, sizeof prefix - 1)) {
+    profile_reply(fd, 400, "Unsupported video profile"); return;
+  }
+  const char *value = path + sizeof prefix - 1;
+  if (!isdigit((unsigned char)*value)) {
+    profile_reply(fd, 400, "Unsupported video profile"); return;
+  }
+  char *end;
+  errno = 0;
+  unsigned long parsed = strtoul(value, &end, 10);
+  if (errno || parsed > 2160 || pbs_capture_profile_for_height((int)parsed, NULL)) {
     profile_reply(fd, 400, "Unsupported resolution"); return;
   }
+  int height = (int)parsed;
+  if (*end) {
+    if (strncmp(end, "&fps=", 5) || !isdigit((unsigned char)end[5])) {
+      profile_reply(fd, 400, "Unsupported frame rate"); return;
+    }
+    errno = 0;
+    parsed = strtoul(end + 5, &end, 10);
+    if (errno || *end || (parsed != 30 && parsed != 60)) {
+      profile_reply(fd, 400, "Unsupported frame rate"); return;
+    }
+    fps = (int)parsed;
+  }
   pthread_mutex_lock(&live.lock);
-  if (!live.profiles_enabled) { code = 501; message = "This capture backend does not support resolution changes"; }
+  if (!fps) fps = live.fps;
+  if (live.capture_error[0]) { code = 409; message = "Capture unavailable; reload the payload before changing video profiles"; }
+  else if (!live.profiles_enabled) { code = 501; message = "This capture backend does not support resolution changes"; }
   else if (!(live.profile_mask & pbs_capture_profile_bit(height))) { code=422; message="This firmware does not support that capture resolution"; }
+  else if (fps != live.fps && (!live.framerates_enabled || !(live.framerate_mask & pbs_capture_framerate_bit(fps)))) { code=422; message="This capture backend does not support that frame rate"; }
   else if (live.rec || live.rec_pending) { code = 409; message = "Stop recording before changing resolution"; }
   else if (live.profile_changing) { code = 409; message = "A resolution change is already in progress"; }
-  else if (height == live.height) { message = "Resolution already active"; }
+  else if (height == live.height && fps == live.fps) {
+    live.profile_fallback_height = 0;
+    message = "Video profile already active";
+  }
   else {
-    live.profile_height = height; live.profile_pending = live.profile_changing = 1;
-    live.profile_error = live.profile_error_height = 0; live.restart_request = 1;
+    live.profile_fallback_height = 0;
+    live.profile_height = height; live.profile_fps = fps; live.profile_pending = live.profile_changing = 1;
+    live.profile_error = live.profile_error_height = live.profile_error_fps = 0; live.restart_request = 1;
   }
   pthread_mutex_unlock(&live.lock);
   profile_reply(fd, code, message);
@@ -241,6 +310,9 @@ int pbs_h264_publish(const void *data, size_t length, uint32_t pts) {
   }
   pthread_cond_broadcast(&live.changed);
   pthread_mutex_unlock(&live.lock);
+#ifdef PBS_DISCORD
+  pbsd_capture_video(data, length, pts);
+#endif
   return 0;
 }
 void pbs_audio_configure(const char *codec, int channels, int rate) {
@@ -271,6 +343,9 @@ int pbs_audio_publish(const void *data, size_t length, uint32_t pts) {
   if (!live.audio_started) live.audio_started = milliseconds();
   pthread_cond_broadcast(&live.changed);
   pthread_mutex_unlock(&live.lock);
+#ifdef PBS_DISCORD
+  pbsd_capture_audio(data, length, pts);
+#endif
   return 0;
 }
 int pbs_h264_server_running(void) {
@@ -283,6 +358,9 @@ int pbs_h264_server_port(void) {
   return result;
 }
 int pbs_h264_take_keyframe_request(void) {
+#ifdef PBS_DISCORD
+  int discord_request = pbsd_capture_keyframe_request();
+#endif
   pthread_mutex_lock(&live.lock);
   uint64_t now = milliseconds();
   /* Refresh the encoder even for clients that never POST /video/keyframe
@@ -294,10 +372,31 @@ int pbs_h264_take_keyframe_request(void) {
       now - live.last_keyframe_ms >= KEYFRAME_INTERVAL_MS &&
       now - live.last_key_request_ms >= KEYFRAME_INTERVAL_MS;
   int result = live.key_request || periodic;
+#ifdef PBS_DISCORD
+  result = result || discord_request;
+#endif
   live.key_request = 0;
   if (result) live.last_key_request_ms = now;
   pthread_mutex_unlock(&live.lock);
   return result;
+}
+void pbs_h264_capture_failed(const char *reason) {
+  pthread_mutex_lock(&live.lock);
+  snprintf(live.capture_error, sizeof live.capture_error, "%s",
+      reason && reason[0] ? reason : "Capture stopped; reload the payload to retry");
+  live.profile_pending = live.profile_changing = live.restart_request = 0;
+  live.profile_height = live.height; live.profile_fps = live.fps;
+  live.profile_fallback_height = 0;
+  live.rec_pending = live.rec_headers_pending = 0;
+  close_recording();
+  /* Release existing media readers while leaving the HTTP listener available. */
+  live.generation++; live.audio_generation++;
+  pthread_cond_broadcast(&live.changed);
+  pthread_mutex_unlock(&live.lock);
+#ifdef PBS_DISCORD
+  /* Capture owns this notification; do not acquire bridge locks under live.lock. */
+  pbsd_capture_stopped();
+#endif
 }
 void pbs_h264_server_stop(void) {
   pthread_mutex_lock(&live.lock);
@@ -315,6 +414,9 @@ void pbs_h264_server_stop(void) {
     if (live.worker_active[i] && live.worker_fd[i] >= 0)
       shutdown(live.worker_fd[i], SHUT_RDWR);
   pthread_cond_broadcast(&live.changed);
+#ifdef PBS_DISCORD
+  pbsd_capture_stopped();
+#endif
   pthread_mutex_unlock(&live.lock);
   pbs_input_stop();
 }
@@ -330,7 +432,7 @@ static void stream(int fd) {
   live.key_request = 1;
   uint64_t last_key_request = milliseconds();
   int synced = 0;
-  while (live.running && generation == live.generation) {
+  while (live.running && !live.capture_error[0] && generation == live.generation) {
     /* A failed or missed encoder IDR request must not strand the viewer. */
     uint64_t now = milliseconds();
     if (!synced && now - last_key_request >= 2000) {
@@ -373,7 +475,7 @@ static void audio_stream(int fd) {
   pthread_mutex_lock(&live.lock);
   uint64_t next = live.audio_seq + 1; /* Start with the first newly published block. */
   uint64_t generation = live.audio_generation;
-  while (live.running && generation == live.audio_generation) {
+  while (live.running && !live.capture_error[0] && generation == live.audio_generation) {
     int alive = 1;
     while (alive && live.running && next > live.audio_seq) alive = wait_media(fd, generation, 1);
     if (!alive || !live.running || generation != live.audio_generation) break;
@@ -416,7 +518,7 @@ static void rtp_stream(int fd, int port) {
   pthread_mutex_lock(&live.lock);
   uint64_t next=live.seq+1, generation=live.generation;
   int synced=0; live.key_request=1;
-  while(live.running && generation==live.generation) {
+  while(live.running && !live.capture_error[0] && generation==live.generation) {
     int alive=1;
     while(alive && live.running && next>live.seq) alive=wait_media(fd,generation,0);
     if(!alive || !live.running || generation!=live.generation)break;
@@ -447,8 +549,21 @@ static void rtp_stream(int fd, int port) {
   pthread_mutex_unlock(&live.lock);
   pbs_video_free(copy, capacity);close(target.socket);
 }
+/* Output needs at most six bytes per input byte, plus the terminator. */
+static void capture_error_json(char *output) {
+  static const char hex[] = "0123456789abcdef";
+  for (const unsigned char *p = (const unsigned char *)live.capture_error; *p; ++p) {
+    if (*p == '"' || *p == '\\') { *output++ = '\\'; *output++ = (char)*p; }
+    else if (*p < 0x20) {
+      *output++ = '\\'; *output++ = 'u'; *output++ = '0'; *output++ = '0';
+      *output++ = hex[*p >> 4]; *output++ = hex[*p & 15];
+    } else *output++ = (char)*p;
+  }
+  *output = 0;
+}
 static void configuration(int fd) {
-  char sps[257], pps[257], body[1536], audio[160], resolutions[64];
+  char sps[257] = {0}, pps[257] = {0}, body[3072], audio[160], resolutions[64], framerates[16];
+  char capture_error[6 * sizeof live.capture_error + 1];
 #ifdef PBS_PS4
   const char *platform = "PS4";
 #else
@@ -460,14 +575,25 @@ static void configuration(int fd) {
   for (unsigned i=0;i<4;i++) if (live.profiles_enabled && (live.profile_mask&pbs_capture_profile_bit(heights[i])))
     used+=(size_t)snprintf(resolutions+used,sizeof resolutions-used,"%s%d",used>1?",":"",heights[i]);
   resolutions[used++]=']';resolutions[used]=0;
+  used=1;framerates[0]='[';
+  const int rates[]={30,60};
+  /* Legacy fixed-rate backends (including PS4 at 30) never gain a new rate
+   * merely because the shared server supports it. PS5 defaults to 60. */
+  unsigned rate_mask=live.framerates_enabled?live.framerate_mask:pbs_capture_framerate_bit(live.fps);
+  for (unsigned i=0;i<2;i++) if (rate_mask & pbs_capture_framerate_bit(rates[i]))
+    used+=(size_t)snprintf(framerates+used,sizeof framerates-used,"%s%d",used>1?",":"",rates[i]);
+  framerates[used++]=']';framerates[used]=0;
   for (size_t i = 0; i < live.sps_len; i++) snprintf(sps + i*2, 3, "%02x", live.sps[i]);
   for (size_t i = 0; i < live.pps_len; i++) snprintf(pps + i*2, 3, "%02x", live.pps[i]);
   if (!strcmp(live.audio_codec, "none")) snprintf(audio, sizeof audio, "null");
   else snprintf(audio, sizeof audio, "{\"codec\":\"%s\",\"channels\":%d,\"rate\":%d,\"bits\":32}",
       live.audio_codec[0] ? live.audio_codec : "pcm_f32le", live.audio_channels, live.audio_rate);
-  int n = snprintf(body, sizeof body, "{\"platform\":\"%s\",\"width\":%d,\"height\":%d,\"fps\":%d,\"codec\":\"avc1.%02x%02x%02x\",\"sps\":\"%s\",\"pps\":\"%s\",\"audio\":%s,\"resolutions\":%s,\"requested_height\":%d,\"profile_changing\":%s,\"profile_error\":%s,\"profile_error_height\":%d}", platform, live.width, live.height, live.fps, live.sps[1], live.sps[2], live.sps[3], sps, pps, audio,
+  capture_error_json(capture_error);
+  int n = snprintf(body, sizeof body, "{\"platform\":\"%s\",\"width\":%d,\"height\":%d,\"fps\":%d,\"codec\":\"avc1.%02x%02x%02x\",\"sps\":\"%s\",\"pps\":\"%s\",\"audio\":%s,\"resolutions\":%s,\"requested_height\":%d,\"profile_changing\":%s,\"profile_error\":%s,\"profile_error_height\":%d,\"framerates\":%s,\"requested_fps\":%d,\"profile_error_fps\":%d,\"profile_fallback_height\":%d,\"capture_error\":\"%s\"}", platform, live.width, live.height, live.fps, live.sps[1], live.sps[2], live.sps[3], sps, pps, audio,
       resolutions, live.profile_changing ? live.profile_height : live.height,
-      live.profile_changing ? "true" : "false", live.profile_error ? "true" : "false", live.profile_error_height);
+      live.profile_changing ? "true" : "false", live.profile_error ? "true" : "false", live.profile_error_height,
+      framerates, live.profile_changing ? live.profile_fps : live.fps, live.profile_error_fps,
+      live.profile_fallback_height, capture_error);
   pthread_mutex_unlock(&live.lock);
   if (n > 0 && (size_t)n < sizeof body) reply(fd, "application/json", body, (size_t)n);
 }
@@ -607,6 +733,72 @@ static void download(int fd, const char *input,const char *range) {
   fclose(file);
 }
 typedef struct { int fd, slot; } client_arg_t;
+#ifdef PBS_DISCORD
+/* The viewer's Livestream tab talks to the Discord engine through these
+ * routes. Bodies are small JSON documents (<= 16 KiB); they arrive after
+ * the header block this handler already buffered, so the declared
+ * remainder is read here before dispatching into the engine bridge. */
+static void discord_reply(int fd, const char *json, size_t n) {
+  char header[160];
+  int h = snprintf(header, sizeof header,
+                   "HTTP/1.1 200 Discord\r\nContent-Type: "
+                   "application/json\r\nContent-Length: %zu\r\nCache-Control: "
+                   "no-store\r\nConnection: close\r\n\r\n", n);
+  /* send_all returns 0 on success, -1 on failure: send the body unless the
+   * header write itself failed. */
+  if (send_all(fd, header, (size_t)h) == 0) send_all(fd, json, n);
+}
+static void discord_route(int fd, const char *method, const char *route,
+                          const char *request, size_t used) {
+  char *body = NULL;
+  size_t declared = 0;
+  for (const char *line = strstr(request, "\r\n"); line && line[2];
+       line = strstr(line + 2, "\r\n")) {
+    if (!strncasecmp(line + 2, "Content-Length:", 15)) {
+      const char *value = line + 17;
+      while (*value == ' ' || *value == '\t') value++;
+      declared = (size_t)strtoul(value, NULL, 10);
+      break;
+    }
+    if (!strncmp(line + 2, "\r\n", 2)) break;
+  }
+  if (declared > 16384) {
+    profile_reply(fd, 413, "Discord request body too large");
+    return;
+  }
+  if (declared) {
+    body = malloc(declared + 1);
+    if (!body) {
+      profile_reply(fd, 500, "Out of memory");
+      return;
+    }
+    const char *head_end = strstr(request, "\r\n\r\n");
+    size_t have = head_end ? used - (size_t)(head_end + 4 - request) : 0;
+    if (have > declared) have = declared;
+    memcpy(body, head_end + 4, have);
+    uint64_t deadline = milliseconds() + 5000;
+    while (have < declared && milliseconds() < deadline) {
+      ssize_t got = recv(fd, body + have, declared - have, 0);
+      if (got <= 0) break;
+      have += (size_t)got;
+    }
+    body[have] = 0;
+    if (have < declared) {
+      free(body);
+      profile_reply(fd, 400, "Incomplete Discord request body");
+      return;
+    }
+  }
+  char *result = pbsd_discord_api(method, route, body);
+  free(body);
+  if (result) {
+    discord_reply(fd, result, strlen(result));
+    pbsd_discord_free(result);
+  } else {
+    profile_reply(fd, 500, "Discord engine failure");
+  }
+}
+#endif
 static void *client_thread(void *arg) {
   client_arg_t client = *(client_arg_t *)arg; free(arg);
   int fd = client.fd;
@@ -642,9 +834,14 @@ static void *client_thread(void *arg) {
   if (sscanf(path, "/rtp/video?port=%d%n", &rtp_port, &consumed) != 1 || path[consumed] || rtp_port < 1024 || rtp_port > 65534) rtp_port = 0;
   if (!strcmp(path, "/frames") || !strcmp(path, "/audio") || rtp_port) {
     pthread_mutex_lock(&live.lock);
-    media = live.media_clients < 8;
+    int capture_unavailable = live.capture_error[0] != 0;
+    media = !capture_unavailable && live.media_clients < 8;
     if (media) live.media_clients++;
     pthread_mutex_unlock(&live.lock);
+    if (capture_unavailable) {
+      profile_reply(fd, 503, "Capture unavailable; reload the payload before streaming");
+      goto done;
+    }
     if (!media) { const char busy[] = "HTTP/1.1 503 Busy\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"; send_all(fd, busy, sizeof busy - 1); goto done; }
   }
   if (!strcmp(method, "GET") && !strcmp(path, "/")) reply(fd, "text/html; charset=utf-8", PBS_H264_HTML, sizeof PBS_H264_HTML - 1);
@@ -658,6 +855,9 @@ static void *client_thread(void *arg) {
     }
   }
   else if (!strncmp(path,"/input/",7)) input_route(fd,method,path,request,used);
+#ifdef PBS_DISCORD
+  else if (!strncmp(path,"/discord/",9)) discord_route(fd,method,path+9,request,used);
+#endif
   else if (!strcmp(method, "GET") && !strcmp(path, "/config.json")) configuration(fd);
   else if (!strcmp(method, "GET") && !strcmp(path, "/status.json")) status(fd);
   else if (!strcmp(method, "GET") && !strcmp(path, "/frames")) stream(fd);
@@ -671,6 +871,11 @@ static void *client_thread(void *arg) {
   else if (!strcmp(method, "GET") && !strncmp(path, "/recordings/", 12)) download(fd, path + 12,range);
   else if (!strcmp(method, "POST") && !strcmp(path, "/record/start")) {
     pthread_mutex_lock(&live.lock);
+    if (live.capture_error[0]) {
+      pthread_mutex_unlock(&live.lock);
+      profile_reply(fd, 409, "Capture unavailable; reload the payload before recording");
+      goto done;
+    }
     storage_load();
     if (live.profile_changing) {
       pthread_mutex_unlock(&live.lock);
@@ -713,11 +918,103 @@ done:
   pthread_mutex_unlock(&live.lock);
   return NULL;
 }
+/* Only the acceptor closes a published listener. Stop may shutdown it under
+ * live.lock, but must never act on an fd already closed and reused elsewhere. */
+static int open_listener(int port) {
+  int fd = socket(AF_INET, SOCK_STREAM, 0);
+  if (fd < 0) return -1;
+  int yes = 1;
+  struct sockaddr_in addr = {.sin_family = AF_INET, .sin_port = htons(port),
+                             .sin_addr.s_addr = htonl(INADDR_ANY)};
+  if (setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof yes) < 0 ||
+      bind(fd, (struct sockaddr *)&addr, sizeof addr) < 0 || listen(fd, 8) < 0) {
+    int error = errno;
+    close(fd);
+    errno = error;
+    return -1;
+  }
+  return fd;
+}
+static void listener_log(const char *event, int port, int error) {
+  char text[192];
+  if (error) snprintf(text, sizeof text, "HTTP listener %s on port %d (errno %d)\n", event, port, error);
+  else snprintf(text, sizeof text, "HTTP listener %s on port %d\n", event, port);
+  fputs(text, stderr);
+#ifdef PBS_PS5
+  FILE *log = fopen("/data/pbs/http.txt", "a");
+  if (log) { fputs(text, log); fclose(log); }
+#endif
+}
+static void listener_backoff(unsigned delay_ms) {
+  struct timespec deadline;
+  clock_gettime(CLOCK_REALTIME, &deadline);
+  deadline.tv_sec += delay_ms / 1000;
+  deadline.tv_nsec += (long)(delay_ms % 1000) * 1000000;
+  if (deadline.tv_nsec >= 1000000000) { deadline.tv_sec++; deadline.tv_nsec -= 1000000000; }
+  pthread_mutex_lock(&live.lock);
+  /* Capture broadcasts changed frequently. They must not shorten backoff. */
+  while (live.running) {
+    int rc = pthread_cond_timedwait(&live.changed, &live.lock, &deadline);
+    if (rc) break;
+  }
+  pthread_mutex_unlock(&live.lock);
+}
 static void *accept_thread(void *arg) {
   (void)arg;
-  while (pbs_h264_server_running()) {
-    int fd = accept(live.listener, NULL, NULL);
-    if (fd < 0) { if (errno == EINTR) continue; break; }
+  int recovering = 0;
+  unsigned backoff = 25;
+  for (;;) {
+    pthread_mutex_lock(&live.lock);
+    int running = live.running, listener = live.listener, port = live.port;
+    pthread_mutex_unlock(&live.lock);
+    if (!running) break;
+    if (listener < 0) {
+      /* Never scan: viewers and the tile keep using the advertised port. */
+      int replacement = open_listener(port);
+      if (replacement < 0) { listener_backoff(250); continue; }
+      pthread_mutex_lock(&live.lock);
+      int installed = live.running && live.listener < 0;
+      if (installed) live.listener = replacement;
+      else close(replacement); /* Still private; stop never saw this fd. */
+      pthread_mutex_unlock(&live.lock);
+      if (!installed) break;
+      /* Binding INADDR_ANY can succeed before the network is usable. Keep
+       * the outage latched until a connection proves recovery, so repeated
+       * accept failures do not log drop/restore on every successful bind. */
+      backoff = 25;
+      continue;
+    }
+    int fd = accept(listener, NULL, NULL);
+    if (fd < 0) {
+      int error = errno;
+      if (error == EINTR) continue;
+      pthread_mutex_lock(&live.lock);
+      running = live.running;
+      pthread_mutex_unlock(&live.lock);
+      if (!running) break;
+      if (error == ECONNABORTED || error == ECONNRESET || error == EPROTO ||
+          error == EAGAIN || error == EWOULDBLOCK || error == EMFILE ||
+          error == ENFILE || error == ENOBUFS || error == ENOMEM) {
+        listener_backoff(backoff);
+        if (backoff < 400) backoff *= 2;
+        continue;
+      }
+      pthread_mutex_lock(&live.lock);
+      running = live.running;
+      if (running && live.listener == listener) {
+        live.listener = -1;
+        close(listener);
+      }
+      pthread_mutex_unlock(&live.lock);
+      if (!running) break;
+      if (!recovering) listener_log("connection lost; recovering", port, error);
+      recovering = 1;
+      listener_backoff(250);
+      continue;
+    }
+    backoff = 25;
+    if (recovering) listener_log("restored", port, 0);
+    recovering = 0;
     pthread_mutex_lock(&live.lock);
     int slot = -1;
     for (int i = 0; i < 16; ++i) if (!live.worker_active[i]) { slot = i; break; }
@@ -737,10 +1034,9 @@ static void *accept_thread(void *arg) {
     } else live.worker_valid[slot] = 1;
   }
   pthread_mutex_lock(&live.lock);
-  int listener = live.listener;
+  if (live.listener >= 0) close(live.listener);
   live.listener = -1;
   pthread_mutex_unlock(&live.lock);
-  if (listener >= 0) close(listener);
   return NULL;
 }
 void pbs_h264_server_wait(void) {
@@ -759,12 +1055,17 @@ int pbs_h264_server_start(int port, int width, int height, const unsigned char *
     size_t sps_len, const unsigned char *pps, size_t pps_len) {
   return pbs_h264_server_start_at_rate(port, width, height, 60, sps, sps_len, pps, pps_len);
 }
-int pbs_h264_server_start_at_rate(int port, int width, int height, int fps,
-    const unsigned char *sps, size_t sps_len, const unsigned char *pps, size_t pps_len) {
-  if (fps != 30 && fps != 60) return -1;
-  if (sps_len < 4 || sps_len > 128 || !pps_len || pps_len > 128 || port < 1 || port > 65535) return -1;
+static int start_server(int port, int width, int height, int fps,
+    const unsigned char *sps, size_t sps_len, const unsigned char *pps, size_t pps_len,
+    const char *dashboard_error) {
+  const int dashboard_only = dashboard_error != NULL;
+  if (port < 1 || port > 65535) return -1;
+  if (!dashboard_only && ((fps != 30 && fps != 60) || !sps || !pps ||
+      sps_len < 4 || sps_len > 128 || !pps_len || pps_len > 128)) return -1;
   pthread_mutex_lock(&live.lock);
   if (live.running) {
+    /* A dashboard bootstrap must never replace an active capture session. */
+    if (dashboard_only) { pthread_mutex_unlock(&live.lock); errno = EBUSY; return -1; }
     /* A new encoder cannot publish packets left in the previous profile's
      * ring. Invalidate both media histories before installing its headers. */
     for (int i = 0; i < SLOTS; ++i) { live.frames[i].seq = 0; live.frames[i].len = 0; live.frames[i].key = 0; }
@@ -773,15 +1074,22 @@ int pbs_h264_server_start_at_rate(int port, int width, int height, int fps,
     live.started = milliseconds(); live.audio_started = 0; live.audio_generation++;
     live.last_keyframe_ms = live.last_key_request_ms = live.started;
     live.width = width; live.height = height; live.fps = fps;
-    if (live.profile_changing && live.profile_height == height) live.profile_changing = 0;
+    live.capture_error[0] = 0;
+    if (live.profile_changing && live.profile_height == height && live.profile_fps == fps)
+      live.profile_changing = 0;
     memcpy(live.sps, sps, sps_len); live.sps_len = sps_len;
     memcpy(live.pps, pps, pps_len); live.pps_len = pps_len;
     live.generation++; live.key_request = 1;
     if (live.rec) live.rec_headers_pending = 1;
     pthread_cond_broadcast(&live.changed);
+#ifdef PBS_DISCORD
+    pbsd_capture_configure(width, height, fps, sps, sps_len, pps, pps_len);
+#endif
     pthread_mutex_unlock(&live.lock);
     return 0;
   }
+  /* A stopped acceptor must release its listener before a new one owns it. */
+  if (live.acceptor_valid) { pthread_mutex_unlock(&live.lock); errno = EBUSY; return -1; }
   pthread_mutex_unlock(&live.lock);
   signal(SIGPIPE, SIG_IGN);
   /* A port owned by another instance must not abort the session: walk the
@@ -789,26 +1097,61 @@ int pbs_h264_server_start_at_rate(int port, int width, int height, int fps,
    * TIME_WAIT, not an active listener, so a real conflict still fails. */
   int fd = -1, bound_port = 0, last_error = 0;
   for (int candidate = port; candidate < port + PBS_H264_PORT_SCAN && candidate <= 65535; ++candidate) {
-    int probe = socket(AF_INET, SOCK_STREAM, 0);
-    if (probe < 0) { last_error = errno; break; }
-    int yes = 1; setsockopt(probe, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof yes);
-    struct sockaddr_in addr = {.sin_family = AF_INET, .sin_port = htons(candidate),
-                               .sin_addr.s_addr = htonl(INADDR_ANY)};
-    if (!bind(probe, (struct sockaddr *)&addr, sizeof addr) && !listen(probe, 8)) {
+    int probe = open_listener(candidate);
+    if (probe >= 0) {
       fd = probe; bound_port = candidate; break;
     }
     last_error = errno;
-    close(probe);
   }
   if (fd < 0) { errno = last_error; return -1; }
+  pthread_mutex_lock(&live.lock);
+  /* Another start may have won while this private socket was binding. */
+  if (live.running || live.acceptor_valid) {
+    close(fd);
+    pthread_mutex_unlock(&live.lock);
+    errno = EBUSY;
+    return -1;
+  }
   live.listener = fd; live.port = bound_port; live.running = 1; live.started = milliseconds();
   live.last_keyframe_ms = live.last_key_request_ms = live.started;
   live.key_request = 1;
   live.width = width; live.height = height; live.fps = fps;
-  memcpy(live.sps, sps, sps_len); live.sps_len = sps_len;
-  memcpy(live.pps, pps, pps_len); live.pps_len = pps_len;
-  if (pthread_create(&live.acceptor, NULL, accept_thread, NULL)) { live.running = 0; close(fd); live.listener = -1; return -1; }
+  memset(live.sps, 0, sizeof live.sps); memset(live.pps, 0, sizeof live.pps);
+  if (sps_len) memcpy(live.sps, sps, sps_len);
+  if (pps_len) memcpy(live.pps, pps, pps_len);
+  live.sps_len = sps_len; live.pps_len = pps_len;
+  if (dashboard_only) {
+    live.seq = live.bytes = live.audio_seq = live.audio_bytes = live.audio_chunks = 0;
+    live.audio_started = 0;
+    snprintf(live.audio_codec, sizeof live.audio_codec, "none");
+    snprintf(live.capture_error, sizeof live.capture_error, "%s", dashboard_error);
+  }
+  if (pthread_create(&live.acceptor, NULL, accept_thread, NULL)) {
+    live.running = 0; close(fd); live.listener = -1;
+    pthread_mutex_unlock(&live.lock);
+    return -1;
+  }
   live.acceptor_valid = 1;
+  if (!dashboard_only) live.capture_error[0] = 0;
+  /* A compatibility fallback can be selected before the first HTTP start. */
+  if (live.profile_changing && live.profile_height == height && live.profile_fps == fps)
+    live.profile_changing = 0;
+#ifdef PBS_DISCORD
+  if (!dashboard_only) pbsd_capture_configure(width, height, fps, sps, sps_len, pps, pps_len);
+#endif
+  pthread_mutex_unlock(&live.lock);
+  if (dashboard_only) pbs_h264_capture_failed(dashboard_error);
   (void)pbs_input_start();
   return 0;
+}
+int pbs_h264_server_start_at_rate(int port, int width, int height, int fps,
+    const unsigned char *sps, size_t sps_len, const unsigned char *pps, size_t pps_len) {
+  return start_server(port, width, height, fps, sps, sps_len, pps, pps_len, NULL);
+}
+int pbs_h264_dashboard_start(int port) {
+  return pbs_h264_dashboard_start_with_error(port, "Capture is unavailable; reload PBS to retry");
+}
+int pbs_h264_dashboard_start_with_error(int port, const char *reason) {
+  return start_server(port, 0, 0, 0, NULL, 0, NULL, 0,
+      reason && reason[0] ? reason : "Capture unavailable; reload the payload to retry");
 }

@@ -1,0 +1,14 @@
+PBS Payload base https://github.com/seregonwar/pbs-payload.git 130fd05a700d5978e9dc3c1258f9d0f7ed116844
+Discord integration source baseline c5ed4840d96f9679eecdb560d7d57ebec6e233a9 (local changes applied after baseline)
+Acheron SPS parser https://github.com/ouwou/acheron.git 36618c43bee62392dccf03bb67a27b5b67052818
+libdave https://github.com/discord/libdave.git 52cd56dc550f447fb354b3a06c9e2d2e2a4309c6
+MLS++ https://github.com/cisco/mlspp.git 92aaa4134fa45ec39957a7c81a342401fba7feb2
+QR Code generator https://www.nayuki.io/page/qr-code-generator-library payload/web/qrcodegen.js (retained MIT notice; exact upstream commit not recorded)
+OpenSSL 3.5.9 https://github.com/openssl/openssl.git 45e844fa2a14ec92d146bd8f5778ac130b6625fb
+Opus 1.5.2 https://github.com/xiph/opus.git ddbe48383984d56acd9e1ab6a090c54ca6b735a6
+nlohmann JSON 3.12.0 https://github.com/nlohmann/json.git 55f93686c01528224f448c19128836e7df245f72
+libsodium 1.0.20 https://download.libsodium.org/libsodium/releases/libsodium-1.0.20.tar.gz SHA256 ebb65ef6ca439333c2bb41a0c1990587288da07f6c7fd07cb3a18cc18d30ce19
+SDK compatibility: ps5-cc defines __NO_TLS to use SDK libc's __getCurrentRuneLocale function; no upstream dependency source patches.
+SDK and LLVM target runtimes: supplied by the builder; not bundled or pinned by this source manifest.
+CA trust bundle: vendor/ca-bundle.pem; provenance and license in LICENSES/ca-certificates.txt.
+Inherited browser dependencies: payload/web/vendor/THIRD-PARTY-LICENSES.

@@ -4,6 +4,26 @@
 #include <stdio.h>
 
 int main(void) {
+  assert(pbs_ps5_2160_unavailable(0x12000043u));
+  assert(!pbs_ps5_2160_unavailable(0x12400009u));
+  assert(!pbs_ps5_2160_unavailable(0u));
+  assert(pbs_ps5_1440_unavailable_for_output(0x12000043u, 0x140u));
+  assert(!pbs_ps5_1440_unavailable_for_output(0x12000043u, 0x13cu));
+  assert(!pbs_ps5_1440_unavailable_for_output(0x12000043u, 0u));
+  assert(!pbs_ps5_1440_unavailable_for_output(0x12000043u, 0x144u));
+  assert(pbs_ps5_1440_unavailable_for_output(0x12000043u, 0x14u));
+  assert(pbs_ps5_1440_unavailable_for_output(0x12000043u, 0x10u));
+  assert(!pbs_ps5_1440_unavailable_for_output(0x12000043u, 0x138u));
+  assert(!pbs_ps5_1440_unavailable_for_output(0x12400009u, 0x14u));
+  assert(!pbs_ps5_1440_unavailable_for_output(0x12400009u, 0x10u));
+  assert(!pbs_ps5_1440_unavailable_for_output(0x12400009u, 0x140u));
+  assert(!pbs_ps5_1440_unavailable_for_output(0x12700001u, 0x140u));
+  assert(!pbs_ps5_1440_unavailable_for_output(0x09400008u, 0x140u));
+  assert(!pbs_ps5_1440_unavailable_for_output(0u, 0x140u));
+  assert(!pbs_ps5_1440_unavailable_for_output(0u, 0u));
+  /* This exact-pair capture limitation is independent of automatic startup. */
+  assert(!pbs_ps5_prefer_1080_before_open(0x12000043u, 0x140u));
+
   /* Bypass a known-rejected 1440p configuration before touching the encoder. */
   assert(pbs_ps5_prefer_1080_before_open(0x12700001u, 0x144u));
   assert(pbs_ps5_prefer_1080_before_open(0x13600007u, 0x14u));
