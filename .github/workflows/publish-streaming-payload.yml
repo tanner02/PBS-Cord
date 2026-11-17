@@ -1,0 +1,49 @@
+name: Publish streaming-only payload
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - releases/streaming-2026-11-17/**
+      - .github/workflows/publish-streaming-payload.yml
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Verify the reviewed prebuilt ELF
+        working-directory: releases/streaming-2026-11-17
+        run: |
+          sha256sum --check SHA256SUMS
+          python3 - <<'PY'
+          import hashlib, json
+          from pathlib import Path
+          data = Path('pbs-discord.elf').read_bytes()
+          info = json.loads(Path('BUILD-INFO.json').read_text())
+          assert data[:4] == b'\x7fELF'
+          assert info['source_commit'] == '5ec0c9a3bedb99578c58a08fbdfd74ab5c928616'
+          assert info['sha256'] == '60e8f0dc305d8bfd71175f2badf17ab3690273f4dc3b4b5bfb13defdf01e67a2'
+          assert hashlib.sha256(data).hexdigest() == info['sha256']
+          assert len(data) == info['bytes']
+          assert info['experimental_voice_chat'] is False
+          PY
+      - name: Publish the streaming-only release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_COMMIT: ${{ github.sha }}
+        run: |
+          gh release create streaming-2026-11-17 \
+            --target "$RELEASE_COMMIT" \
+            --title 'PBS Cord — streaming-only build (2026-11-17)' \
+            --notes-file releases/streaming-2026-11-17/README.md \
+            releases/streaming-2026-11-17/pbs-discord.elf \
+            releases/streaming-2026-11-17/SHA256SUMS \
+            releases/streaming-2026-11-17/BUILD-INFO.json

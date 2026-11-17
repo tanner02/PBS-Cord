@@ -1,0 +1,14 @@
+{
+  "source_commit": "5ec0c9a3bedb99578c58a08fbdfd74ab5c928616",
+  "source_tree": "b6534374ef57583f6abcd26287f1c22bef131f7b",
+  "file": "pbs-discord.elf",
+  "bytes": 11185608,
+  "sha256": "60e8f0dc305d8bfd71175f2badf17ab3690273f4dc3b4b5bfb13defdf01e67a2",
+  "experimental_voice_chat": false,
+  "verification": [
+    "ELF header",
+    "PBS Cord branding",
+    "experimental voice symbol exclusion"
+  ],
+  "console_reloaded": false
+}
