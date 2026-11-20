@@ -17,6 +17,9 @@ private:
   std::atomic<bool> enabled_{false};
   std::mutex mutex_;
 };
-nlohmann::json game_activity_presence(bool enabled,
-                                      const std::optional<GameTitle> &game);
+// Application namespace used by the PS5 playing activity integration.
+inline constexpr char game_activity_application_id[] = "1565829739241807882";
+std::string discord_game_image(const nlohmann::json &response);
+nlohmann::json game_activity_presence(bool enabled, const std::optional<GameTitle> &game,
+                                      const std::string &image = {});
 } // namespace pbsd

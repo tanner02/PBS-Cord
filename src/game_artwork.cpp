@@ -6,6 +6,7 @@
 #include <fcntl.h>
 #include <limits>
 #include <nlohmann/json.hpp>
+#include <openssl/hmac.h>
 #include <sys/stat.h>
 #include <unistd.h>
 #include <vector>
@@ -14,6 +15,46 @@ namespace pbsd {
 namespace {
 using Json = nlohmann::json;
 constexpr std::size_t page_limit = 2 * 1024 * 1024;
+constexpr std::string_view ps4_image_prefix =
+    "https://gs2-sec.ww.prod.dl.playstation.net/gs2-sec/appkgo/prod/";
+
+std::string ps4_metadata_url(std::string_view id) {
+  if (!is_game_title_id(id) || !id.starts_with("CUSA")) return {};
+  const auto np_title = std::string(id) + "_00";
+  // Sony's public TMDB lookup convention uses this fixed title-hashing key.
+  static constexpr unsigned char key[] = {
+      0xf5, 0xde, 0x66, 0xd2, 0x68, 0x0e, 0x25, 0x5b, 0x2d, 0xf7, 0x9e, 0x74, 0xf8, 0x90, 0xeb, 0xf3,
+      0x49, 0x26, 0x2f, 0x61, 0x8b, 0xca, 0xe2, 0xa9, 0xac, 0xcd, 0xee, 0x51, 0x56, 0xce, 0x8d, 0xf2,
+      0xcd, 0xf2, 0xd4, 0x8c, 0x71, 0x17, 0x3c, 0xdc, 0x25, 0x94, 0x46, 0x5b, 0x87, 0x40, 0x5d, 0x19,
+      0x7c, 0xf1, 0xae, 0xd3, 0xb7, 0xe9, 0x67, 0x1e, 0xeb, 0x56, 0xca, 0x67, 0x53, 0xc2, 0xe6, 0xb0,
+  };
+  unsigned char digest[EVP_MAX_MD_SIZE];
+  unsigned length = 0;
+  if (!HMAC(EVP_sha1(), key, sizeof(key), reinterpret_cast<const unsigned char *>(np_title.data()),
+            np_title.size(), digest, &length)) return {};
+  std::string hex;
+  constexpr char alphabet[] = "0123456789ABCDEF";
+  for (unsigned i = 0; i < length; ++i) {
+    hex += alphabet[digest[i] >> 4];
+    hex += alphabet[digest[i] & 15];
+  }
+  return "https://tmdb.np.dl.playstation.net/tmdb2/" + np_title + "_" + hex + "/" + np_title + ".json";
+}
+
+std::string ps4_metadata_image(std::string_view body, const std::string &id) {
+  const auto metadata = Json::parse(body, nullptr, false);
+  if (!metadata.is_object() || metadata.value("npTitleId", Json()) != id + "_00") return {};
+  const auto icons = metadata.find("icons");
+  if (icons == metadata.end() || !icons->is_array()) return {};
+  const auto title_prefix = std::string(ps4_image_prefix) + id + "_00/";
+  for (const auto &entry : *icons) {
+    if (!entry.is_object() || !entry.contains("icon") || !entry["icon"].is_string()) continue;
+    auto image = entry["icon"].get<std::string>();
+    if (image.starts_with("http://")) image.insert(4, "s");
+    if (image.starts_with(title_prefix) && public_game_image_url(image)) return image;
+  }
+  return {};
+}
 bool digits(std::string_view s) {
   return !s.empty() && s.size() <= 12 && s.find_first_not_of("0123456789") == s.npos;
 }
@@ -63,7 +104,7 @@ std::map<std::string, std::string> read_manifest(const std::string &path) {
     return {};
   std::map<std::string, std::string> images;
   for (const auto &[key, value] : root["images"].items()) {
-    if (!valid_store_key(key) || !value.is_string()) continue;
+    if ((!valid_store_key(key) && !is_game_title_id(key)) || !value.is_string()) continue;
     const auto &image = value.get_ref<const std::string &>();
     if (public_game_image_url(image)) images.emplace(key, image);
   }
@@ -104,7 +145,8 @@ std::string product_image(const Json &product) {
 bool public_game_image_url(std::string_view url) {
   if (url.size() > 256 ||
       !(url.starts_with("https://image.api.playstation.com/") ||
-        url.starts_with("https://image.dl.playstation.net/"))) return false;
+        url.starts_with("https://image.dl.playstation.net/") ||
+        url.starts_with(ps4_image_prefix))) return false;
   return std::all_of(url.begin(), url.end(), [](unsigned char c) {
     return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
            (c >= '0' && c <= '9') || std::string_view(":/._-?=&%+~").find(c) != std::string_view::npos;
@@ -169,12 +211,22 @@ GameArtwork::~GameArtwork() {
   if (worker_.joinable()) worker_.join();
 }
 std::string GameArtwork::image(const GameTitle &game) {
-  const auto key = game_store_url(game);
-  if (key.empty()) return {};
+  if (!is_game_title_id(game.title_id)) return {};
+  const auto store_url = game_store_url(game);
+  const auto key = game.title_id.starts_with("CUSA") ? game.title_id : store_url;
   std::lock_guard lock(mutex_);
+  if (const auto it = cache_.find(game.title_id);
+      it != cache_.end() && it->second.expires == std::numeric_limits<std::uint64_t>::max())
+    return it->second.image;
+  if (store_url != key) {
+    const auto it = cache_.find(store_url);
+    if (it != cache_.end()) return it->second.image;
+  }
+  if (key.empty()) return {};
   const auto it = cache_.find(key);
   if (it != cache_.end() && monotonic_ms() < it->second.expires) return it->second.image;
-  if (active_ != key && (!pending_ || game_store_url(*pending_) != key)) {
+  if (active_ != key && (!pending_ || pending_->title_id != game.title_id ||
+                         game_store_url(*pending_) != store_url)) {
     pending_ = game;
     if (!worker_.joinable()) worker_ = std::thread(&GameArtwork::run, this);
     changed_.notify_one();
@@ -188,11 +240,21 @@ void GameArtwork::run() {
     if (stopping_) break;
     auto game = std::move(*pending_);
     pending_.reset();
-    active_ = game_store_url(game);
+    const auto store_url = game_store_url(game);
+    const bool ps4 = game.title_id.starts_with("CUSA");
+    active_ = ps4 ? game.title_id : store_url;
     const auto key = active_;
     lock.unlock();
     std::string image;
-    try { image = parse_game_store_image(fetch_(key), game); } catch (...) { }
+    if (ps4) {
+      try {
+        const auto url = ps4_metadata_url(game.title_id);
+        if (!url.empty()) image = ps4_metadata_image(fetch_(url), game.title_id);
+      } catch (...) { }
+    }
+    if (image.empty() && !store_url.empty()) {
+      try { image = parse_game_store_image(fetch_(store_url), game); } catch (...) { }
+    }
     lock.lock();
     // Reserve room for up to 32 seeded covers plus 32 online results. Offline
     // covers must survive a lookup miss when the Store is blocked by DNS.

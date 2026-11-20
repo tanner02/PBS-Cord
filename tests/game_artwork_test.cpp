@@ -120,6 +120,26 @@ int main() {
   assert(parse_game_store_image("<script id='__NEXT_DATA__'>", title).empty());
   assert(parse_game_store_image(std::string(2 * 1024 * 1024 + 1, ' ') + concept_page(title, cover), title).empty());
 
+  // Delisted and disc PS4 titles can have neither a concept nor a usable Store SKU.
+  const GameTitle ps4{"CUSA01433", "Rocket League"};
+  const std::string tmdb_url = "https://tmdb.np.dl.playstation.net/tmdb2/"
+      "CUSA01433_00_74520BBFF3DF8FB578A6772271B6D746F2BF5E9E/CUSA01433_00.json";
+  const std::string tmdb_icon = "https://gs2-sec.ww.prod.dl.playstation.net/gs2-sec/appkgo/prod/"
+      "CUSA01433_00/7/i_5c5e430a49994f22df5fd81f446ead7b6ae45027af490b415fe4e744a9918e4c/i/icon0.png";
+  {
+    FetchGate tmdb;
+    tmdb.pages[tmdb_url] = nlohmann::json{
+        {"npTitleId", "CUSA01433_00"},
+        {"icons", {{{"icon", "http" + tmdb_icon.substr(5)}, {"type", "512x512"}}}}}.dump();
+    GameArtwork ps4_artwork([&](const auto &url) { return tmdb.fetch(url); });
+    assert(public_game_image_url(tmdb_icon));
+    assert(ps4_artwork.image(ps4).empty());
+    tmdb.await(1);
+    tmdb.release(1);
+    await_image(ps4_artwork, ps4, tmdb_icon);
+    tmdb.no_more_than(1);
+  }
+
   auto a = game("10000001"), b = game("10000002"), c = game("10000003"), d = game("10000004");
   FetchGate gate;
   gate.pages = {{game_store_url(a), concept_page(a, cover)}, {game_store_url(b), "not a store page"},
@@ -180,7 +200,7 @@ int main() {
     close(fd);
   };
   using Json = nlohmann::json;
-  Json images = {{game_store_url(title), cover}};
+  Json images = {{game_store_url(title), cover}, {ps4.title_id, tmdb_icon}};
   std::vector<GameTitle> regional_titles;
   for (const auto &region : {"UP", "EP", "HP", "JP"}) {
     auto product_title = game("");
@@ -199,6 +219,7 @@ int main() {
     GameArtwork cached(fixture_fetch, manifest_path);
     assert(manifest_fetches == 0);
     for (int i = 0; i < 20; ++i) assert(cached.image(title) == cover);
+    assert(cached.image(ps4) == tmdb_icon);
     for (const auto &product_title : regional_titles)
       assert(cached.image(product_title) == other_cover);
     assert(manifest_fetches == 0);

@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-3.0-or-later
-"""Cache public Store artwork via anonymous FTP without uploading local icons."""
+"""Cache public PlayStation artwork for one title or all console metadata entries."""
 import argparse
 import ftplib
+import hashlib
+import hmac
 import io
 import json
 import posixpath
@@ -11,6 +13,7 @@ import sys
 import urllib.parse
 import urllib.request
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from html.parser import HTMLParser
 
 META_LIMIT, PAGE_LIMIT, MANIFEST_LIMIT = 1024 * 1024, 2 * 1024 * 1024, 256 * 1024
@@ -18,11 +21,18 @@ TITLE = re.compile(r'(?:PPSA|CUSA)[0-9]{5}\Z')
 CONTENT = re.compile(r'[A-Z]{2}[0-9]{4}-((?:PPSA|CUSA)[0-9]{5})_[0-9]{2}-[A-Za-z0-9_]{16}\Z')
 DIGITS = re.compile(r'[0-9]{1,12}\Z')
 LOCALES = {'EP': 'en-gb', 'HP': 'en-hk', 'JP': 'ja-jp', 'UP': 'en-us'}
+TMDB_PREFIX = 'https://tmdb.np.dl.playstation.net/tmdb2/'
+PS4_IMAGE_PREFIX = 'https://gs2-sec.ww.prod.dl.playstation.net/gs2-sec/appkgo/prod/'
+# Sony's public TMDB title-hashing convention, also used by the payload.
+TMDB_KEY = bytes.fromhex(
+    'F5DE66D2680E255B2DF79E74F890EBF349262F618BCAE2A9ACCDEE5156CE8DF2'
+    'CDF2D48C71173CDC2594465B87405D197CF1AED3B7E9671EEB56CA6753C2E6B0'
+)
 
 
 def image_url(value):
     return (isinstance(value, str) and len(value) <= 256 and
-            value.startswith(('https://image.api.playstation.com/', 'https://image.dl.playstation.net/')) and
+            value.startswith(('https://image.api.playstation.com/', 'https://image.dl.playstation.net/', PS4_IMAGE_PREFIX)) and
             re.fullmatch(r'[A-Za-z0-9:/._?=&%+~\-]+', value) is not None)
 
 
@@ -123,18 +133,18 @@ def manifest(data):
     value = {'version': 1, 'images': {}} if data is None else parse_json(data)
     if (not isinstance(value, dict) or set(value) != {'version', 'images'} or type(value['version']) is not int or value['version'] != 1 or
             not isinstance(value['images'], dict) or len(value['images']) > 32 or
-            any(not valid_store_url(key) or not image_url(image) for key, image in value['images'].items())):
+            any(not (TITLE.fullmatch(key) or valid_store_url(key)) or not image_url(image) for key, image in value['images'].items())):
         raise ValueError('Existing artwork manifest is invalid; refusing to replace it')
     return value
 
 
-def install(ftp, directory, key, image):
+def install(ftp, directory, images):
     target = directory + '/game-artwork.json'
     old = retrieve(ftp, target, MANIFEST_LIMIT)
     value = manifest(old)
-    if key not in value['images'] and len(value['images']) == 32:
-        raise ValueError('Artwork manifest already contains 32 entries')
-    value['images'][key] = image
+    value['images'].update(images)
+    if len(value['images']) > 32:
+        raise ValueError('Artwork manifest would exceed 32 entries')
     data = (json.dumps(value, sort_keys=True, separators=(',', ':')) + '\n').encode('utf-8')
     if len(data) > MANIFEST_LIMIT:
         raise ValueError('Artwork manifest exceeds size limit')
@@ -178,41 +188,118 @@ def install(ftp, directory, key, image):
                 pass
 
 
+def download(url, limit, *, accept):
+    request = urllib.request.Request(url, headers={
+        'User-Agent': 'PBS-Discord-Artwork/1', 'Accept': accept, 'Accept-Encoding': 'identity',
+    })
+    with urllib.request.build_opener(StoreRedirect()).open(request, timeout=8) as response:
+        data = response.read(limit + 1)
+    if len(data) > limit:
+        raise ValueError('Public artwork metadata exceeds size limit')
+    return data
+
+
+def ps4_artwork(title):
+    np_title = title + '_00'
+    digest = hmac.digest(TMDB_KEY, np_title.encode('ascii'), 'sha1').hex().upper()
+    url = f'{TMDB_PREFIX}{np_title}_{digest}/{np_title}.json'
+    data = parse_json(download(url, META_LIMIT, accept='application/json'))
+    if not isinstance(data, dict) or data.get('npTitleId') != np_title:
+        raise ValueError('PlayStation metadata did not match the PS4 title ID')
+    icons = data.get('icons')
+    for entry in icons if isinstance(icons, list) else []:
+        value = entry.get('icon') if isinstance(entry, dict) else None
+        if isinstance(value, str):
+            if value.startswith('http://'):
+                value = 'https://' + value[7:]
+            if value.startswith(PS4_IMAGE_PREFIX + np_title + '/') and image_url(value):
+                return value
+    raise ValueError('No public PlayStation icon for this PS4 title')
+
+
+def ps5_metadata(ftp, title):
+    raw = retrieve(ftp, f'/user/appmeta/{title}/param.json', META_LIMIT)
+    metadata = parse_json(raw) if raw is not None else None
+    if not isinstance(metadata, dict) or metadata.get('titleId') != title:
+        raise ValueError('Matching param.json is missing or invalid')
+    content, concept = metadata.get('contentId', ''), metadata.get('conceptId', '')
+    match = CONTENT.fullmatch(content) if isinstance(content, str) else None
+    if not match or match[1] != title:
+        content = ''
+    if not isinstance(concept, str) or not DIGITS.fullmatch(concept):
+        concept = ''
+    return content, concept
+
+
+def resolve_title(title, identifiers):
+    if title.startswith('CUSA'):
+        return ps4_artwork(title)
+    content, concept = identifiers
+    try:
+        url = store_url(content, concept)
+        page = download(url, PAGE_LIMIT, accept='text/html')
+        return artwork(page.decode('utf-8'), content, concept)
+    except (ValueError, OSError):
+        if not concept or not content or content[:2] not in LOCALES:
+            raise
+    url = store_url(content)
+    page = download(url, PAGE_LIMIT, accept='text/html')
+    return artwork(page.decode('utf-8'), content, concept)
+
+
+def installed_title_ids(ftp):
+    ftp.cwd('/user/appmeta')
+    entries = []
+    ftp.retrlines('LIST', entries.append)
+    names = {entry.rsplit(maxsplit=1)[-1] for entry in entries if entry.startswith('d')}
+    return sorted(name for name in names if TITLE.fullmatch(name))
+
+
 def main():
     args = argparse.ArgumentParser(description=__doc__)
     args.add_argument('--host', required=True)
     args.add_argument('--port', type=int, default=2121)
-    args.add_argument('--title', required=True)
+    selection = args.add_mutually_exclusive_group(required=True)
+    selection.add_argument('--title')
+    selection.add_argument('--all', action='store_true', help='Cache artwork for all title IDs in /user/appmeta')
     args.add_argument('--output-dir', default='/data/pbs-discord')
     options = args.parse_args()
     directory = options.output_dir.rstrip('/')
-    if not TITLE.fullmatch(options.title) or not 1 <= options.port <= 65535:
+    if (options.title and not TITLE.fullmatch(options.title)) or not 1 <= options.port <= 65535:
         raise ValueError('Expected PPSA/CUSA plus five digits and a valid FTP port')
-    if not directory.startswith('/') or directory != posixpath.normpath(directory) or any(ord(c) < 32 or c == '\\' for c in directory):
+    if not directory.startswith('/') or directory != posixpath.normpath(directory) or any(ord(c) < 32 or c == chr(92) for c in directory):
         raise ValueError('Output directory must be an absolute normalized FTP path')
     with ftplib.FTP(timeout=10) as ftp:
         ftp.connect(options.host, options.port)
         ftp.login()
-        raw = retrieve(ftp, '/user/appmeta/' + options.title + '/param.json', META_LIMIT)
-        metadata = parse_json(raw) if raw is not None else None
-        if not isinstance(metadata, dict) or metadata.get('titleId') != options.title:
-            raise ValueError('Matching param.json is missing or invalid')
-        content, concept = metadata.get('contentId', ''), metadata.get('conceptId', '')
-        match = CONTENT.fullmatch(content) if isinstance(content, str) else None
-        if not isinstance(content, str) or (content and (not match or match[1] != options.title)):
-            raise ValueError('Invalid or mismatched game content ID')
-        if not isinstance(concept, str) or (concept and not DIGITS.fullmatch(concept)):
-            raise ValueError('Invalid game concept ID')
-        key = store_url(content, concept)
-        request = urllib.request.Request(key, headers={'User-Agent': 'PBS-Discord-Artwork/1', 'Accept': 'text/html', 'Accept-Encoding': 'identity'})
-        with urllib.request.build_opener(StoreRedirect()).open(request, timeout=10) as response:
-            page = response.read(PAGE_LIMIT + 1)
-        if len(page) > PAGE_LIMIT:
-            raise ValueError('Store page exceeds size limit')
-        image = artwork(page.decode('utf-8'), content, concept)
-        install(ftp, directory, key, image)
-    print(options.title)
-    print(image)
+        titles = installed_title_ids(ftp) if options.all else [options.title]
+        if not titles:
+            raise ValueError('No PS4 or PS5 title IDs found')
+        images = {}
+        with ThreadPoolExecutor(max_workers=6) as workers:
+            pending = {}
+            for title in titles:
+                try:
+                    identifiers = ps5_metadata(ftp, title) if title.startswith('PPSA') else None
+                    pending[title] = workers.submit(resolve_title, title, identifiers)
+                except (ValueError, OSError, ftplib.Error) as error:
+                    if not options.all:
+                        raise
+                    print(f'{title}: {error}', file=sys.stderr)
+            for title, result in pending.items():
+                try:
+                    images[title] = result.result()
+                except (ValueError, OSError) as error:
+                    if not options.all:
+                        raise
+                    print(f'{title}: {error}', file=sys.stderr)
+        if not images:
+            raise ValueError('No public PlayStation artwork found')
+        install(ftp, directory, images)
+    for title, image in images.items():
+        print(title, image)
+    if options.all:
+        print(f'Cached artwork for {len(images)} of {len(titles)} title IDs')
 
 
 if __name__ == '__main__':

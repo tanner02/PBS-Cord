@@ -8,6 +8,7 @@
 #include <chrono>
 #include <cstdio>
 #include <fstream>
+#include <future>
 #include <openssl/pem.h>
 #include <openssl/rsa.h>
 #include <openssl/sha.h>
@@ -637,6 +638,10 @@ Json Controller::api(const std::string &path, const Json &body) {
 }
 void Controller::gateway() {
   auto token = token_copy();
+  struct EraseToken {
+    std::string &token;
+    ~EraseToken() { secure_erase(token.data(), token.size()); }
+  } erase_token{token};
   WebSocket ws;
   ws.connect("wss://gateway.discord.gg/?v=10&encoding=json");
   auto send = [&](int op, const Json &d) {
@@ -652,6 +657,11 @@ void Controller::gateway() {
                 ready_deadline = monotonic_ms() + 30000;
   std::uint64_t next_activity_poll = 0;
   Json last_activities = Json::array();
+  std::string requested_image, activity_asset;
+  std::uint64_t retry_asset_at = 0;
+  // The request uses the Gateway account token. The future joins before that
+  // token goes out of scope, including on disconnect.
+  std::future<std::string> asset_lookup;
   auto clear = [&](bool leave) {
     std::unique_ptr<VoiceSession> s, c;
     {
@@ -751,7 +761,33 @@ void Controller::gateway() {
           if (!enabled) game.reset();
           activity_game_ = game;
         }
-        auto presence = game_activity_presence(enabled, game);
+        const auto artwork = game ? game->image_url : std::string();
+        if (asset_lookup.valid() &&
+            asset_lookup.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
+          auto asset = asset_lookup.get();
+          if (requested_image == artwork) activity_asset = std::move(asset);
+        }
+        if (!asset_lookup.valid() && !artwork.empty() &&
+            (requested_image != artwork || (activity_asset.empty() && now >= retry_asset_at))) {
+          requested_image = artwork;
+          activity_asset.clear();
+          retry_asset_at = now + 60'000;
+          try {
+            asset_lookup = std::async(std::launch::async, [artwork, &token] {
+              try {
+                const std::string endpoint = std::string("https://discord.com/api/v10/applications/") +
+                    game_activity_application_id + "/external-assets";
+                const auto body = Json{{"urls", Json::array({artwork})}}.dump();
+                const auto response = https("POST", endpoint, body, token, {}, 3000, 16 * 1024);
+                if (response.status == 200)
+                  return discord_game_image(Json::parse(response.body, nullptr, false));
+              } catch (...) { }
+              return std::string{};
+            });
+          } catch (const std::system_error &) { }
+        }
+        auto presence = game_activity_presence(enabled, game,
+            artwork == requested_image ? activity_asset : std::string{});
         if (presence.at("activities") != last_activities) {
           send(3, presence);
           last_activities = presence.at("activities");
@@ -949,6 +985,8 @@ void Controller::gateway() {
           set_state("ready", call_error);
         } else if (!stream_error.empty()) {
           finish_stream(stream_error);
+        } else if (want_stream && !capture_feed().info().running) {
+          finish_stream("PS5 capture stopped. Reload PBS to retry.");
         } else if (ready)
           set_state("streaming");
         else if (!rtc_connected && now > join_deadline) {
@@ -957,21 +995,16 @@ void Controller::gateway() {
       }
     }
   } catch (const WebSocketClose &closed) {
-    secure_erase(token.data(), token.size());
     if (closed.code() == 4004)
       throw std::runtime_error("Discord rejected account authentication (Gateway close 4004). "
                                "The saved session may be expired or revoked; link the account again.");
     throw std::runtime_error(std::string("Discord account Gateway: ") + closed.what());
-  } catch (...) {
-    secure_erase(token.data(), token.size());
-    throw;
   }
   try {
     if (!last_activities.empty()) send(3, game_activity_presence(false, {}));
     clear(true);
   } catch (...) {
   }
-  secure_erase(token.data(), token.size());
   ws.close();
 }
 } // namespace pbsd

@@ -124,10 +124,16 @@ int main() {
   assert(presence == expected && presence.dump().find(game.title_id) == std::string::npos);
   auto with_art = game;
   with_art.image_url = "https://image.api.playstation.com/vulcan/test.png";
-  expected["activities"][0]["assets"] = {{"large_image", with_art.image_url}, {"large_text", game.name}};
-  assert(game_activity_presence(true, with_art) == expected);
-  assert(game_activity_presence(false, with_art) == empty);
-  with_art.image_url = "http://192.0.2.1:9999/icon.png";
+  const std::string asset_path = "external/discord_hash/https/image.api.playstation.com/vulcan/test.png";
+  const auto asset = discord_game_image(Json::array({{{"external_asset_path", asset_path}}}));
+  assert(asset == "mp:" + asset_path);
+  expected["activities"][0]["application_id"] = game_activity_application_id;
+  expected["activities"][0]["assets"] = {{"large_image", asset}, {"large_text", game.name}};
+  assert(game_activity_presence(true, with_art, asset) == expected);
   assert(game_activity_presence(true, with_art) == presence);
+  assert(game_activity_presence(false, with_art, asset) == empty);
+  assert(discord_game_image(Json::array({{{"external_asset_path", "external/../x"}}})).empty());
+  assert(discord_game_image(Json::array({{{"external_asset_path", with_art.image_url}}})).empty());
+  assert(discord_game_image(Json::object()).empty());
   std::cout << "Activity opt-in persistence and presence fixtures passed\n";
 }

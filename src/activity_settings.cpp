@@ -1,6 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "activity_settings.hpp"
-#include "game_artwork.hpp"
 #include <cerrno>
 #include <cstdio>
 #include <cstdlib>
@@ -90,13 +89,26 @@ void ActivitySettings::set_enabled(bool enabled) {
   enabled_ = enabled;
 }
 
-nlohmann::json game_activity_presence(bool enabled,
-                                      const std::optional<GameTitle> &game) {
+std::string discord_game_image(const Json &response) {
+  if (!response.is_array() || response.size() != 1 || !response[0].is_object()) return {};
+  const auto path = response[0].find("external_asset_path");
+  if (path == response[0].end() || !path->is_string()) return {};
+  const auto &value = path->get_ref<const std::string &>();
+  if (!value.starts_with("external/") || value.size() > 512 ||
+      value.find_first_not_of("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_.~/%?=&+") != value.npos ||
+      value.find("/../") != value.npos || value.ends_with("/..")) return {};
+  return "mp:" + value;
+}
+
+nlohmann::json game_activity_presence(bool enabled, const std::optional<GameTitle> &game,
+                                      const std::string &image) {
   Json activities = Json::array();
   if (enabled && game) {
     Json activity{{"name", game->name}, {"type", 0}};
-    if (public_game_image_url(game->image_url))
-      activity["assets"] = {{"large_image", game->image_url}, {"large_text", game->name}};
+    if (!image.empty()) {
+      activity["application_id"] = game_activity_application_id;
+      activity["assets"] = {{"large_image", image}, {"large_text", game->name}};
+    }
     activities.push_back(std::move(activity));
   }
   return {{"since", 0}, {"status", "online"},
