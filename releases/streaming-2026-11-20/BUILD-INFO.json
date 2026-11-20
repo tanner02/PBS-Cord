@@ -1,0 +1,14 @@
+{
+  "source_commit": "4f0e5869e1937c6bd5f8df97680dcaee090618be",
+  "source_tree": "31b7dca2737d739f7252ca7415953c4725e1e723",
+  "file": "pbs-discord.elf",
+  "bytes": 11206520,
+  "sha256": "4267afeba80350e53242a63fd003ed900322276a740d75782f5ad989f4ad23ef",
+  "experimental_voice_chat": false,
+  "verification": [
+    "PS5 cross-build",
+    "ELF header",
+    "24 host tests"
+  ],
+  "console_reloaded": false
+}

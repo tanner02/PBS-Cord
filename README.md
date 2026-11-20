@@ -6,7 +6,7 @@ PBS-Cord adds a Discord Livestream tab to the PBS dashboard, branded **PBS Cord*
 
 ## Use
 
-The latest streaming-only payload is available from [GitHub Releases](https://github.com/tanner02/PBS-Cord/releases/tag/streaming-2026-11-17), with its SHA-256 checksum and matching source revision.
+The latest streaming-only payload is available from [GitHub Releases](https://github.com/tanner02/PBS-Cord/releases/latest), with its SHA-256 checksum and matching source revision.
 
 Build or obtain `pbs-discord.elf`, then load it using your PS5 payload loader. Open the PBS dashboard on the console's LAN address and port (9999 by default), or use its console tile. In Livestream, link Discord, select a destination and start. Capture quality controls select resolution and frame rate. The default requested encoder bitrate is **4 Mbit/s**; the default capture profile is 720p. See [BUILDING.md](BUILDING.md) for build commands and loader arguments.
 
