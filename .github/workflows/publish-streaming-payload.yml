@@ -28,8 +28,8 @@ jobs:
           data = Path('pbs-discord.elf').read_bytes()
           info = json.loads(Path('BUILD-INFO.json').read_text())
           assert data[:4] == b'\x7fELF'
-          assert info['source_commit'] == '4f0e5869e1937c6bd5f8df97680dcaee090618be'
-          assert info['sha256'] == '4267afeba80350e53242a63fd003ed900322276a740d75782f5ad989f4ad23ef'
+          assert info['source_commit'] == '5d8c17a04c098850c7f2b58a86ed34ab53f1fedc'
+          assert info['sha256'] == 'b8514e4c6660be33af6b7146005331179d845bd0abf6a64dd0af5d452c6eaaa8'
           assert hashlib.sha256(data).hexdigest() == info['sha256']
           assert len(data) == info['bytes']
           assert info['experimental_voice_chat'] is False
@@ -38,12 +38,9 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
-          RELEASE_COMMIT: ${{ github.sha }}
         run: |
-          gh release create streaming-2026-11-20 \
-            --target "$RELEASE_COMMIT" \
-            --title 'PBS Cord — streaming-only build (2026-11-20)' \
-            --notes-file releases/streaming-2026-11-20/README.md \
+          gh release upload streaming-2026-11-20 --clobber \
             releases/streaming-2026-11-20/pbs-discord.elf \
             releases/streaming-2026-11-20/SHA256SUMS \
             releases/streaming-2026-11-20/BUILD-INFO.json
+          gh release edit streaming-2026-11-20 --notes-file releases/streaming-2026-11-20/README.md

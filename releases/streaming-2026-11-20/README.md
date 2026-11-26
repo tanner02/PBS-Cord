@@ -4,14 +4,14 @@ This PS5 build fixes missing Discord game icons. It uses Discord's media proxy f
 
 Download `pbs-discord.elf` and load it with your PS5 payload loader. The matching source and build instructions are available below.
 
-- [Source commit](https://github.com/tanner02/PBS-Cord/tree/4f0e5869e1937c6bd5f8df97680dcaee090618be)
-- [Build instructions](https://github.com/tanner02/PBS-Cord/blob/4f0e5869e1937c6bd5f8df97680dcaee090618be/BUILDING.md)
-- [Component licenses](https://github.com/tanner02/PBS-Cord/blob/4f0e5869e1937c6bd5f8df97680dcaee090618be/THIRD_PARTY.md)
+- [Source commit](https://github.com/tanner02/PBS-Cord/tree/5d8c17a04c098850c7f2b58a86ed34ab53f1fedc)
+- [Build instructions](https://github.com/tanner02/PBS-Cord/blob/5d8c17a04c098850c7f2b58a86ed34ab53f1fedc/BUILDING.md)
+- [Component licenses](https://github.com/tanner02/PBS-Cord/blob/5d8c17a04c098850c7f2b58a86ed34ab53f1fedc/THIRD_PARTY.md)
 
-The PS5 cross-build and all 24 host tests passed. This exact ELF has not been run on a PS5.
+The dashboard now listens on TCP port 9878 by default. The PS5 cross-build and the payload argument test passed. This exact ELF has not been run on a PS5.
 
 SHA-256 (`pbs-discord.elf`)
 
 ```text
-4267afeba80350e53242a63fd003ed900322276a740d75782f5ad989f4ad23ef
+b8514e4c6660be33af6b7146005331179d845bd0abf6a64dd0af5d452c6eaaa8
 ```
