@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "account_store.hpp"
-#include "crypto.hpp"
+#include "account_vault.hpp"
 #include "net.hpp"
 #include <algorithm>
 #include <cerrno>
@@ -106,7 +106,7 @@ std::optional<std::string> AccountStore::restore() const {
 }
 void AccountStore::forget() {
   std::lock_guard lock(mutex_);
-  for (const auto *name : {"/account-auto.vault", "/account-auto.key"}) {
+  for (const auto *name : {"/account-auto.vault", "/account-auto.vault.tmp", "/account-auto.key"}) {
     if (unlink((directory_ + name).c_str()) && errno != ENOENT)
       throw std::runtime_error("Could not remove saved account");
   }

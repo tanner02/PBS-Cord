@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // DAVE lifecycle adapted from Acheron (ouwou), GPL-3.0-or-later.
 #pragma once
+#include "account_vault.hpp"
 #include "types.hpp"
 #include <dave/dave_interfaces.h>
 #include <functional>
@@ -55,7 +56,4 @@ private:
   void complete(int transition);
   void reset();
 };
-void save_vault(const std::string &path, const std::string &passphrase,
-                const std::string &token);
-std::string load_vault(const std::string &path, const std::string &passphrase);
 } // namespace pbsd

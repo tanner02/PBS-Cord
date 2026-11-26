@@ -81,7 +81,7 @@ def collect(base, phase, out, ffmpeg=None):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("url", help="Console URL, for example http://192.168.1.20:9999")
+    parser.add_argument("url", help="Console URL, for example http://192.168.1.20:9878")
     parser.add_argument("--phase", choices=("tv-on", "tv-off"), required=True)
     parser.add_argument("--out", type=Path)
     parser.add_argument("--ffmpeg", default=shutil.which("ffmpeg"))

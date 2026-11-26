@@ -493,7 +493,12 @@ static int release_capture_step(void *opaque,pbs_ps5_release_step step) {
 int main(int argc, char **argv) {
   const char *mode = argc > 1 ? argv[1] : "avserve";
   if (strcmp(mode, "avserve")) { notify("PBS: use avserve [720p|1080p|1440p|2160p] [fps=30|60] [bitrate=N] [minqp=N] [norate] [offsetdump] [dependencydump] [moduledump] [noaudio] [nocontroller] [port]"); return 1; }
-  char *serve_args[] = {argv[0], "avopenfast", "SceRemotePlay", "grant", "11", "2", "0", "9999", "2560", "1440", "1"};
+#ifdef PBS_DISCORD
+  const char *default_dashboard_port = "9878";
+#else
+  const char *default_dashboard_port = "9999";
+#endif
+  char *serve_args[] = {argv[0], "avopenfast", "SceRemotePlay", "grant", "11", "2", "0", (char *)default_dashboard_port, "2560", "1440", "1"};
 #if defined(PBS_PS5_DEFAULT_1080P)
   serve_args[4] = "12"; serve_args[8] = "1920"; serve_args[9] = "1080";
 #elif defined(PBS_PS5_DEFAULT_720P)
@@ -1022,7 +1027,7 @@ avopen_retry:;
         opened_session = 1;
         owned_session_closed = 0;
         if (diagnostic_open_only) fprintf(f, "diagnostic open-only: closing handle without starting stream\n");
-        else if (argc > 6) capture_stream(f, &ctx, h, atoi(argv[6]), argc > 7 ? atoi(argv[7]) : 9999, width, height, fps_mode == 0 ? 30 : 60, capture_feature, audio_mode);
+        else if (argc > 6) capture_stream(f, &ctx, h, atoi(argv[6]), argc > 7 ? atoi(argv[7]) : atoi(default_dashboard_port), width, height, fps_mode == 0 ? 30 : 60, capture_feature, audio_mode);
         intptr_t close_fn = pbs_resolve_in(ctx.pid, "libSceAvcap2.sprx", "sceAvcap2Close");
         if (close_fn && !ctx.asserted) {
           long close_rc = call(&ctx, close_fn, (uint64_t[6]){h, 0, 0, 0, 0, 0});

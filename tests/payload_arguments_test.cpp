@@ -22,7 +22,7 @@ int main() {
   assert(parse({"--capture", "1080p"}).capture_profile == "1080p");
   auto defaults = parse({"pbs-discord"});
   assert(defaults.capture_profile == "720p" && defaults.capture_bitrate == 4000000);
-  assert(parse({}).tile_port == 9999);
+  assert(parse({}).tile_port == 9878);
   auto legacy = parse({"--data", "/data/old", "--port", "1234", "--address", "127.0.0.1"});
   assert(legacy.passthrough.empty());
   std::cout << "payload arguments: normal and loader argv layouts pass\n";

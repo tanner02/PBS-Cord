@@ -9,7 +9,7 @@ include(cmake/dependencies.cmake)
 set(CMAKE_CXX_STANDARD 20)
 execute_process(COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/scripts/embed.py" --out "${CMAKE_CURRENT_BINARY_DIR}/generated" COMMAND_ERROR_IS_FATAL ANY)
 # Discord voice signaling remains required for streaming video and game audio.
-add_library(pbsd_core STATIC src/media.cpp src/sps.cpp src/capture.cpp src/net.cpp src/crypto.cpp src/voice.cpp src/controller.cpp src/platform.cpp src/xmb.cpp src/discord_bridge.cpp src/login_verification.cpp src/instance.cpp src/game_activity.cpp src/game_artwork.cpp src/activity_settings.cpp src/account_store.cpp)
+add_library(pbsd_core STATIC src/media.cpp src/sps.cpp src/capture.cpp src/net.cpp src/crypto.cpp src/voice.cpp src/controller.cpp src/platform.cpp src/xmb.cpp src/discord_bridge.cpp src/login_verification.cpp src/instance.cpp src/game_activity.cpp src/game_artwork.cpp src/activity_settings.cpp src/account_store.cpp src/account_vault.cpp)
 target_include_directories(pbsd_core PUBLIC src "${CMAKE_CURRENT_BINARY_DIR}/generated")
 target_link_libraries(pbsd_core PUBLIC libdave MLSPP::mlspp OpenSSL::SSL OpenSSL::Crypto ${SODIUM_TARGET} ${OPUS_TARGET} nlohmann_json::nlohmann_json)
 target_compile_options(pbsd_core PRIVATE -Wall -Wextra -Wpedantic)

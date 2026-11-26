@@ -33,7 +33,7 @@ int main() {
   std::printf("PBS tile installer: staging and registering tile...\n");
   std::fflush(stdout);
   std::string diagnostic;
-  if (pbsd::xmb_install_tile("http://127.0.0.1:9999/", diagnostic)) {
+  if (pbsd::xmb_install_tile("http://127.0.0.1:9878/", diagnostic)) {
     std::printf("XMB tile: %s\n", diagnostic.c_str());
     std::fflush(stdout);
 #ifdef PBS_PS5

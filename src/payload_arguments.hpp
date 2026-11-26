@@ -6,7 +6,7 @@ namespace pbsd {
 struct PayloadArguments {
   std::string capture_profile = "720p";
   unsigned long capture_bitrate = 4000000;
-  int tile_port = 9999;
+  int tile_port = 9878;
   std::vector<std::string> passthrough;
 };
 inline PayloadArguments parse_payload_arguments(int argc, char *const *argv) {
